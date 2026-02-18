@@ -823,9 +823,8 @@ classdef KinematicsApp < matlab.apps.AppBase
                 return;
             end
 
-            numStream = app.numStream;
-            app.streamH = gobjects(numStream, 1);
-            for i = 1:numStream
+            app.streamH = gobjects(app.numStream, 1);
+            for i = 1:app.numStream
                 app.streamH(i) = plot(app.Axes, nan, nan, '-', 'LineWidth', 1.2);
 
                 if i == 1
@@ -1114,23 +1113,23 @@ classdef KinematicsApp < matlab.apps.AppBase
             names = {};
 
             if ~isempty(app.qh) && isgraphics(app.qh) && strcmp(app.qh.Visible, 'on')
-                hs(end + 1) = app.qh; %#ok<AGROW>
-                names{end + 1} = 'Velocity field'; %#ok<AGROW>
+                hs(end + 1) = app.qh; 
+                names{end + 1} = 'Velocity field';
             end
 
             if ~isempty(app.streamH) && isgraphics(app.streamH(1)) && strcmp(app.streamH(1).Visible, 'on')
-                hs(end + 1) = app.streamH(1); %#ok<AGROW>
-                names{end + 1} = 'Streamlines'; %#ok<AGROW>
+                hs(end + 1) = app.streamH(1);
+                names{end + 1} = 'Streamlines';
             end
 
             if ~isempty(app.pathLine) && isgraphics(app.pathLine) && strcmp(app.pathLine.Visible, 'on')
-                hs(end + 1) = app.pathLine; %#ok<AGROW>
-                names{end + 1} = 'Pathline'; %#ok<AGROW>
+                hs(end + 1) = app.pathLine;
+                names{end + 1} = 'Pathline';
             end
 
             if ~isempty(app.streakLine) && isgraphics(app.streakLine) && strcmp(app.streakLine.Visible, 'on')
-                hs(end + 1) = app.streakLine; %#ok<AGROW>
-                names{end + 1} = 'Streakline'; %#ok<AGROW>
+                hs(end + 1) = app.streakLine;
+                names{end + 1} = 'Streakline';
             end
 
             if isempty(hs)
