@@ -892,11 +892,12 @@ classdef KinematicsApp < matlab.apps.AppBase
                     om = app.OmegaField.Value;
 
                     if abs(om) < 1e-12
+                        C = linspace(app.yMin, app.yMax, n);
 
                         for i = 1:n
-                            setLine(i, x, app.Cvals(min(i, numel(app.Cvals))) + 0 * x);
+                            setLine(i, x, C(i) + 0*x);
                         end
-
+                        
                         return;
                     end
 
