@@ -55,16 +55,15 @@ classdef KinematicsApp < matlab.apps.AppBase
 
     properties (Access = private)
         % Fixed simulation settings
-        fpsConst double = 30          % Fixed FPS
-        TmaxConst double = 12         % Used only for axis sizing in uniform cases
+        FPS double = 30               % Fixed FPS
+        TMAX double = 12              % Used only for axis sizing in uniform cases
 
-        % Streamline
+        % Streamlines
         numStream int32 = 9           % Number of streamlines
 
-        % Performance limits (keep only most recent samples)
+        % Performance limits
         maxPathPts double = 6000      % Pathline polyline points
         maxStreakPts double = 1200    % Streak particles kept
-        pathStride double = 1         % Store every k ticks (1 = store all)
         tickCount uint64 = uint64(0)  % Number of ticks since the start of the simulation
 
         % Timer
@@ -72,7 +71,7 @@ classdef KinematicsApp < matlab.apps.AppBase
         t double = 0                  % Simulation time (seconds)
         isRunning logical = false     % Flag for simulation state
 
-        % Flags for clear
+        % Guards
         isResetting logical = false   % Flag to avoid running the timer callback during reset
         isTicking logical = false     % Flag to avoid running the reset callback during timer tick
 
@@ -85,30 +84,28 @@ classdef KinematicsApp < matlab.apps.AppBase
         streakLine                    % Streakline
         streakDots                    % Streakdots
 
-        % Cached geometry
-        Cvals double                  % Streamlines
+        % Streak release
         dtRel double = 0.12           % Streak release interval (seconds)
-        xg double                     % Grid of x values for streamlines
-        yg double                     % Grid of y values for streamlines
+
+        % Grid for quiver
+        xg double
+        yg double
 
         % Axis limits
-        xMin double                  % Axis limits (computed from the velocity field and TmaxConst)
-        xMax double                  % Axis limits (computed from the velocity field and TmaxConst)
-        yMin double                  % Axis limits (computed from the velocity field and TmaxConst)
-        yMax double                  % Axis limits (computed from the velocity field and TmaxConst)
+        xMin double
+        xMax double
+        yMin double
+        yMax double
 
-        % Histories (RK)
-        pathX double = 0             % Pathline history of x positions
-        pathY double = 0             % Pathline history of y positions
-        streakX double = 0           % Streakline history of x positions
-        streakY double = 0           % Streakline history of y positions
-        lastReleaseT double = 0      % Last time a streak particle was released
+        % Histories
+        pathX double = 0              % Pathline history of x positions
+        pathY double = 0              % Pathline history of y positions
+        streakX double = 0            % Streakline history of x positions
+        streakY double = 0            % Streakline history of y positions
+        lastReleaseT double = 0       % Last time a streak particle was released
 
-        % Interface
-        fontsizeLabels = 18          % Font size for labels and buttons
-
-        % Flags
-        showLegend = false           % Flag to show legend
+        % UI style
+        fontsizeLabels = 18           % Font size for labels and buttons
     end
 
     methods (Access = public)
@@ -171,7 +168,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             %
             % Args:
             %     app (KinematicsApp): App instance
-            
+
             app.UIFigure = uifigure('Name', 'Kinematics', 'Color', [0.94, 0.94, 0.94]);
             app.UIFigure.Position(3:4) = [900, 400];
             app.UIFigure.CloseRequestFcn = @(~, ~) onClose(app);
@@ -191,7 +188,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.Axes = uiaxes(gl);
             configureAxesAppearance(app);
 
-            % Left-panel grid (scrollable)
+            % Left-panel grid
             lp = uigridlayout(app.LeftPanel, [12, 3]);
             lp.Scrollable = 'on';
             lp.RowHeight = {22, 22, 22, 22, 22, 22, 22, 22, 22, 12, 30, 30};
@@ -209,63 +206,47 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.ProblemDropDown.Layout.Row = 1;
             app.ProblemDropDown.Layout.Column = [2, 3];
 
-            % Velocity field row
-            app.VelCheckBox = uicheckbox(lp, ...
-                'Text', 'Velocity field', ...
-                'ValueChangedFcn', @(~, ~) toggleVisibility(app), ...
+            % Velocity
+            app.VelCheckBox = uicheckbox(lp, 'Text', 'Velocity field', 'ValueChangedFcn', @(~, ~) toggleVisibility(app), ...
                 'FontSize', app.fontsizeLabels - 4);
             app.VelCheckBox.Layout.Row = 2;
             app.VelCheckBox.Layout.Column = [1, 2];
 
-            app.VelColorPicker = uicolorpicker(lp, ...
-                'Value', [204, 204, 204] / 255, ...
-                'ValueChangedFcn', @(~, ~) colorChanged(app));
+            app.VelColorPicker = uicolorpicker(lp, 'Value', [204, 204, 204] / 255, 'ValueChangedFcn', @(~, ~) colorChanged(app));
             app.VelColorPicker.Layout.Row = 2;
             app.VelColorPicker.Layout.Column = 3;
 
-            % Streamline row
-            app.StreamCheckBox = uicheckbox(lp, ...
-                'Text', 'Streamline', ...
-                'ValueChangedFcn', @(~, ~) toggleVisibility(app), ...
+            % Streamline
+            app.StreamCheckBox = uicheckbox(lp, 'Text', 'Streamline', 'ValueChangedFcn', @(~, ~) toggleVisibility(app), ...
                 'FontSize', app.fontsizeLabels - 4);
             app.StreamCheckBox.Layout.Row = 3;
             app.StreamCheckBox.Layout.Column = [1, 2];
 
-            app.StreamColorPicker = uicolorpicker(lp, ...
-                'Value', [0.91, 0.51, 0.49], ...
-                'ValueChangedFcn', @(~, ~) colorChanged(app));
+            app.StreamColorPicker = uicolorpicker(lp, 'Value', [0.91, 0.51, 0.49], 'ValueChangedFcn', @(~, ~) colorChanged(app));
             app.StreamColorPicker.Layout.Row = 3;
             app.StreamColorPicker.Layout.Column = 3;
 
-            % Pathline row
-            app.PathCheckBox = uicheckbox(lp, ...
-                'Text', 'Pathline', ...
-                'ValueChangedFcn', @(~, ~) toggleVisibility(app), ...
+            % Pathline
+            app.PathCheckBox = uicheckbox(lp, 'Text', 'Pathline', 'ValueChangedFcn', @(~, ~) toggleVisibility(app), ...
                 'FontSize', app.fontsizeLabels - 4);
             app.PathCheckBox.Layout.Row = 4;
             app.PathCheckBox.Layout.Column = [1, 2];
 
-            app.PathColorPicker = uicolorpicker(lp, ...
-                'Value', [89, 156, 155] / 255, ...
-                'ValueChangedFcn', @(~, ~) colorChanged(app));
+            app.PathColorPicker = uicolorpicker(lp, 'Value', [89, 156, 155] / 255, 'ValueChangedFcn', @(~, ~) colorChanged(app));
             app.PathColorPicker.Layout.Row = 4;
             app.PathColorPicker.Layout.Column = 3;
 
-            % Streakline row
-            app.StreakCheckBox = uicheckbox(lp, ...
-                'Text', 'Streakline', ...
-                'ValueChangedFcn', @(~, ~) toggleVisibility(app), ...
+            % Streakline
+            app.StreakCheckBox = uicheckbox(lp, 'Text', 'Streakline', 'ValueChangedFcn', @(~, ~) toggleVisibility(app), ...
                 'FontSize', app.fontsizeLabels - 4);
             app.StreakCheckBox.Layout.Row = 5;
             app.StreakCheckBox.Layout.Column = [1, 2];
 
-            app.StreakColorPicker = uicolorpicker(lp, ...
-                'Value', [152, 209, 208] / 255, ...
-                'ValueChangedFcn', @(~, ~) colorChanged(app));
+            app.StreakColorPicker = uicolorpicker(lp, 'Value', [152, 209, 208] / 255, 'ValueChangedFcn', @(~, ~) colorChanged(app));
             app.StreakColorPicker.Layout.Row = 5;
             app.StreakColorPicker.Layout.Column = 3;
 
-            % V0 row
+            % V0
             app.V0Label = uilabel(lp, 'Text', '$V_0$ [m/s]', 'HorizontalAlignment', 'left', 'FontSize', app.fontsizeLabels - 4);
             app.V0Label.Interpreter = 'latex';
             app.V0Label.Layout.Row = 6;
@@ -276,7 +257,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.V0Field.Layout.Row = 6;
             app.V0Field.Layout.Column = [2, 3];
 
-            % x0 row
+            % x0
             app.X0Label = uilabel(lp, 'Text', '$x_0$ [m]', 'HorizontalAlignment', 'left', 'FontSize', app.fontsizeLabels - 4);
             app.X0Label.Interpreter = 'latex';
             app.X0Label.Layout.Row = 7;
@@ -287,7 +268,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.X0Field.Layout.Row = 7;
             app.X0Field.Layout.Column = [2, 3];
 
-            % y0 row
+            % y0
             app.Y0Label = uilabel(lp, 'Text', '$y_0$ [m]', 'HorizontalAlignment', 'left', 'FontSize', app.fontsizeLabels - 4);
             app.Y0Label.Interpreter = 'latex';
             app.Y0Label.Layout.Row = 8;
@@ -298,7 +279,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.Y0Field.Layout.Row = 8;
             app.Y0Field.Layout.Column = [2, 3];
 
-            % Omega row
+            % Omega
             app.OmegaLabel = uilabel(lp, 'Text', '$\omega$ [1/s]', 'HorizontalAlignment', 'left', 'FontSize', app.fontsizeLabels - 4);
             app.OmegaLabel.Interpreter = 'latex';
             app.OmegaLabel.Layout.Row = 9;
@@ -309,7 +290,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.OmegaField.Layout.Row = 9;
             app.OmegaField.Layout.Column = [2, 3];
 
-            % Buttons row (nested grid)
+            % Buttons
             btnGrid = uigridlayout(lp, [1, 2]);
             btnGrid.Layout.Row = 11;
             btnGrid.Layout.Column = [1, 3];
@@ -321,7 +302,6 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.RunButton = uibutton(btnGrid, 'Text', 'run', 'ButtonPushedFcn', @(~, ~) onRun(app), 'FontSize', app.fontsizeLabels - 4);
             app.StopButton = uibutton(btnGrid, 'Text', 'stop', 'ButtonPushedFcn', @(~, ~) onStop(app), 'FontSize', app.fontsizeLabels - 4);
 
-            % Clear row
             app.ClearButton = uibutton(lp, 'Text', 'clear', 'ButtonPushedFcn', @(~, ~) resetAll(app), 'FontSize', app.fontsizeLabels - 4);
             app.ClearButton.Layout.Row = 12;
             app.ClearButton.Layout.Column = [1, 3];
@@ -347,16 +327,16 @@ classdef KinematicsApp < matlab.apps.AppBase
 
             app.Axes.XLabel.String = '$x$ [m]';
             app.Axes.YLabel.String = '$y$ [m]';
-            updateTitle(app);
 
             app.Axes.XGrid = 'off';
             app.Axes.YGrid = 'off';
             app.Axes.XMinorGrid = 'off';
             app.Axes.YMinorGrid = 'off';
+
+            updateTitle(app);
         end
 
         function onClose(app)
-            % UIFigure CloseRequestFcn callback. Stops timer and deletes the app.
             stopTimer(app);
             delete(app);
         end
@@ -368,7 +348,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             updateOmegaEnable(app);
             updateV0Enable(app);
             resetAll(app);
-            
+
             if wasRunning
                 startTimer(app);
             end
@@ -376,24 +356,18 @@ classdef KinematicsApp < matlab.apps.AppBase
         end
 
         function colorChanged(app)
-            % Callback for color pickers. Updates the colors of all graphics objects.
             updateColors(app);
-            updateLegend(app);
         end
 
         %% ------------------ Enable/Disable parameters ------------------
         function updateOmegaEnable(app)
             % Enable/disable omega input depending on the selected problem
 
-            % Definitions
-            needsOmega = problemUsesOmega(app);
-
-            % Update UI
-            if needsOmega
+            if problemUsesOmega(app)
                 app.OmegaField.Enable = 'on';
                 return
             end
-            
+
             app.OmegaField.Enable = 'off';
         end
 
@@ -402,22 +376,16 @@ classdef KinematicsApp < matlab.apps.AppBase
             %
             % Returns:
             %     tf (logical): True if omega is used by the selected velocity field
-            val = app.ProblemDropDown.Value;
-            tf = contains(val, 'ω');
+            tf = contains(app.ProblemDropDown.Value, 'ω');
         end
 
         function updateV0Enable(app)
             % Enable/disable V0 input depending on the selected problem
 
-            % Definitions
-            needsV0 = problemUsesV0(app);
-
-            % Update UI
-            if needsV0
+            if problemUsesV0(app)
                 app.V0Field.Enable = 'on';
                 return
             end
-
             app.V0Field.Enable = 'off';
         end
 
@@ -426,12 +394,11 @@ classdef KinematicsApp < matlab.apps.AppBase
             %
             % Returns:
             %     tf (logical): True if V0 is used by the selected velocity field
-            val = app.ProblemDropDown.Value;
-            tf = contains(val, 'V0');
+            tf = contains(app.ProblemDropDown.Value, 'V0');
         end
 
         function tf = isUnsteady(app)
-            % Return true if the selected velocity field is time-dependent.
+            % Return true if the selected velocity field is time-dependent
             tf = strcmp(app.ProblemDropDown.Value, 'Unsteady uniform: u=V0, v=V0 sin(ωt)');
         end
 
@@ -458,10 +425,12 @@ classdef KinematicsApp < matlab.apps.AppBase
             %     u (double): x-velocity component at (x, y, t)
             %     v (double): y-velocity component at (x, y, t)
 
+            % Definitions
             V0 = app.V0Field.Value;
             om = app.OmegaField.Value;
             problemCase = app.ProblemDropDown.Value;
 
+            % Get velocity components
             switch problemCase
                 case 'Unsteady uniform: u=V0, v=V0 sin(ωt)'
                     u = V0 + 0 * x;
@@ -492,7 +461,7 @@ classdef KinematicsApp < matlab.apps.AppBase
                     v = sin(om * y);
 
                 case 'Steady polynomial: u=(x^2+x-2)(x^2+x-12), v=y-3x+7'
-                    u = (x .^ 2 + x - 2) .* (x .^ 2 + x - 12);
+                    u = (x.^2 + x - 2) .* (x.^2 + x - 12);
                     v = y - 3 * x + 7;
 
                 otherwise
@@ -502,7 +471,7 @@ classdef KinematicsApp < matlab.apps.AppBase
         end
 
         %% -------------------- RK4 helpers --------------------
-        function [xn, yn] = rk4Particle(app, x, y, t, dt)
+        function [xn, yn] = rk4(app, x, y, t, dt)
             % Advance one particle with classic RK4
             %
             % Args:
@@ -522,26 +491,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             yn = y + dt * (k1y + 2 * k2y + 2 * k3y + k4y) / 6;
         end
 
-        function [xn, yn] = rk4ParticleVec(app, x, y, t, dt)
-            % Vectorized RK4 for arrays x, y (streak particles)
-            %
-            % Args:
-            %     x, y (double): arrays of particle positions
-            %     t (double): current time
-            %     dt (double): time step
-            %
-            % Returns:
-            %     xn, yn (double): arrays of updated particle positions
-
-            [k1x, k1y] = app.velocity(x, y, t);
-            [k2x, k2y] = app.velocity(x + 0.5 * dt * k1x, y + 0.5 * dt * k1y, t + 0.5 * dt);
-            [k3x, k3y] = app.velocity(x + 0.5 * dt * k2x, y + 0.5 * dt * k2y, t + 0.5 * dt);
-            [k4x, k4y] = app.velocity(x + dt * k3x, y + dt * k3y, t + dt);
-
-            xn = x + dt * (k1x + 2 * k2x + 2 * k3x + k4x) / 6;
-            yn = y + dt * (k1y + 2 * k2y + 2 * k3y + k4y) / 6;
-        end
-
+        %% -------------------- Streamlines numeric helpers --------------------
         function [dx, dy] = unitDir(app, x, y, tFix)
             % Unit tangent direction for streamline integration:
             %     dX/ds = u/||u||, dY/ds = v/||u||
@@ -654,6 +604,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             %   * For uniform flows, x-range depends on V0 and TmaxConst
             %   * For other cases, a default window around (x0,y0) is used
 
+            % Definitions
             V0 = app.V0Field.Value;
             om = app.OmegaField.Value;
             val = app.ProblemDropDown.Value;
@@ -661,35 +612,26 @@ classdef KinematicsApp < matlab.apps.AppBase
 
             switch val
                 case 'Unsteady uniform: u=V0, v=V0 sin(ωt)'
-                    xMin0 = -1;
-                    xMax0 = x0 + V0 * max(app.TmaxConst, 0) + 1;
+                    Vabs = abs(V0);
+                    app.xMin = x0 - Vabs * max(app.TMAX, 0) - 1;
+                    app.xMax = x0 + Vabs * max(app.TMAX, 0) + 1;
 
-                    if om ~= 0
-                        A = 2 * V0 / om;
-                        if ~isfinite(A)
-                            A = 1;
-                        end
+                    if abs(om) > 1e-12
+                        A = 2 * Vabs / abs(om);
+                        if ~isfinite(A), A = 1; end
                     else
                         A = 1;
                     end
-                    yMin0 = -1.2 * abs(A) - 1;
-                    yMax0 =  1.2 * abs(A) + 1;
 
-                    app.xMin = min(xMin0, x0 - 1);
-                    app.xMax = max(xMax0, x0 + 1);
-                    app.yMin = min(yMin0, y0 - 1);
-                    app.yMax = max(yMax0, y0 + 1);
+                    app.yMin = y0 - 1.2 * A - 1;
+                    app.yMax = y0 + 1.2 * A + 1;
 
                 case 'Steady uniform: u=V0, v=0'
-                    xMin0 = -1;
-                    xMax0 = x0 + V0 * max(app.TmaxConst, 0) + 1;
-                    yMin0 = -4;
-                    yMax0 = 4;
-
-                    app.xMin = min(xMin0, x0 - 1);
-                    app.xMax = max(xMax0, x0 + 1);
-                    app.yMin = min(yMin0, y0 - 1);
-                    app.yMax = max(yMax0, y0 + 1);
+                    Vabs = abs(V0);
+                    app.xMin = x0 - Vabs * max(app.TMAX, 0) - 1;
+                    app.xMax = x0 + Vabs * max(app.TMAX, 0) + 1;
+                    app.yMin = y0 - 4;
+                    app.yMax = y0 + 4;
 
                 case 'Steady cellular: u=cos(ωx), v=sin(ωy)'
                     K = max(abs(om), 0.5);
@@ -700,15 +642,10 @@ classdef KinematicsApp < matlab.apps.AppBase
                     app.yMax = y0 + L;
 
                 case 'Steady polynomial: u=(x^2+x-2)(x^2+x-12), v=y-3x+7'
-                    app.xMin = -6;
-                    app.xMax = 6;
-                    app.yMin = -22;
-                    app.yMax = 6;
-
-                    app.xMin = min(app.xMin, x0 - 1);
-                    app.xMax = max(app.xMax, x0 + 1);
-                    app.yMin = min(app.yMin, y0 - 1);
-                    app.yMax = max(app.yMax, y0 + 1);
+                    app.xMin = min(-6, x0 - 1);
+                    app.xMax = max( 6, x0 + 1);
+                    app.yMin = min(-22, y0 - 1);
+                    app.yMax = max(  6, y0 + 1);
 
                 otherwise
                     app.xMin = x0 - 4;
@@ -737,8 +674,6 @@ classdef KinematicsApp < matlab.apps.AppBase
             end
 
             % Delete all children (including HandleVisibility='off')
-            legend(app.Axes, 'off');
-
             try
                 delete(allchild(app.Axes));
             catch
@@ -793,9 +728,6 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.srcDot = plot(app.Axes, x0, y0, 'ko', 'MarkerFaceColor', 'k', 'MarkerSize', 6);
             app.srcDot.HandleVisibility = 'off';
 
-            % Streamlines setup
-            app.Cvals = linspace(app.yMin, app.yMax, app.numStream);
-
             ensureStreamObjects(app);
             ensurePathObjects(app);
             ensureStreakObjects(app);
@@ -826,16 +758,8 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.streamH = gobjects(app.numStream, 1);
             for i = 1:app.numStream
                 app.streamH(i) = plot(app.Axes, nan, nan, '-', 'LineWidth', 1.2);
-
-                if i == 1
-                    app.streamH(i).DisplayName = 'Streamlines';
-                    app.streamH(i).HandleVisibility = 'on';
-                else
-                    app.streamH(i).HandleVisibility = 'off';
-                end
-
+                app.streamH(i).HandleVisibility = 'off';
             end
-
         end
 
         function ensurePathObjects(app)
@@ -958,7 +882,7 @@ classdef KinematicsApp < matlab.apps.AppBase
                 case 'Steady shear: u=V0, v=V0 x'
                     C = linspace(app.yMin, app.yMax, n);
                     for i = 1:n
-                        y = 0.5 * x .^ 2 + C(i);
+                        y = 0.5 * x.^2 + C(i);
                         setLine(i, x, y);
                     end
 
@@ -1053,43 +977,25 @@ classdef KinematicsApp < matlab.apps.AppBase
 
         end
 
-        %% -------------------- Hide/Show (no reset) --------------------
+        %% -------------------- Visibility --------------------
         function toggleVisibility(app)
-            % Toggle object visibility from checkboxes (no reset)
+            % Toggle object visibility from checkboxes
 
-            setVisible(app.qh, app.VelCheckBox.Value);
-            setVisible(app.streamH, app.StreamCheckBox.Value);
-            setVisible(app.pathLine, app.PathCheckBox.Value);
-            setVisible(app.pDot, app.PathCheckBox.Value);
-            setVisible(app.streakLine, app.StreakCheckBox.Value);
-            setVisible(app.streakDots, app.StreakCheckBox.Value);
+            setOnOff(app.qh, app.VelCheckBox.Value);
+            setOnOff(app.streamH, app.StreamCheckBox.Value);
+            setOnOff([app.pathLine, app.pDot], app.PathCheckBox.Value);
+            setOnOff([app.streakLine, app.streakDots], app.StreakCheckBox.Value);
 
-            
-            updateLegend(app);
-
-            function setVisible(h, tf)
-                if isempty(h)
-                    return;
-                end
-
-                if iscell(h)
-                    h = [h{:}];
-                end
-
+            function setOnOff(h, tf)
+                if isempty(h), return; end
                 for k = 1:numel(h)
-
-                    if ~isgraphics(h(k))
-                        continue;
-                    end
-
-                    if tf
-                        h(k).Visible = 'on';
-                    else
-                        h(k).Visible = 'off';
-                    end
-
+                    if ~isgraphics(h(k)), continue; end
+                    h(k).Visible = tern(tf, 'on', 'off');
                 end
+            end
 
+            function out = tern(cond, a, b)
+                if cond, out = a; else, out = b; end
             end
         end
 
@@ -1097,48 +1003,6 @@ classdef KinematicsApp < matlab.apps.AppBase
             % Update title with current time and velocity info      
             timeLine = sprintf('$t = %.2f\\,\\mathrm{s}$', app.t);
             app.Axes.Title.String = timeLine;
-        end
-
-        function updateLegend(app)
-            % Update legend (optional).
-            %
-            % Notes:
-            %   * Controlled by app.showLegend.Value
-
-            if ~app.showLegend
-                return
-            end
-
-            hs = gobjects(0);
-            names = {};
-
-            if ~isempty(app.qh) && isgraphics(app.qh) && strcmp(app.qh.Visible, 'on')
-                hs(end + 1) = app.qh; 
-                names{end + 1} = 'Velocity field';
-            end
-
-            if ~isempty(app.streamH) && isgraphics(app.streamH(1)) && strcmp(app.streamH(1).Visible, 'on')
-                hs(end + 1) = app.streamH(1);
-                names{end + 1} = 'Streamlines';
-            end
-
-            if ~isempty(app.pathLine) && isgraphics(app.pathLine) && strcmp(app.pathLine.Visible, 'on')
-                hs(end + 1) = app.pathLine;
-                names{end + 1} = 'Pathline';
-            end
-
-            if ~isempty(app.streakLine) && isgraphics(app.streakLine) && strcmp(app.streakLine.Visible, 'on')
-                hs(end + 1) = app.streakLine;
-                names{end + 1} = 'Streakline';
-            end
-
-            if isempty(hs)
-                legend(app.Axes, 'off');
-            else
-                lg = legend(app.Axes, hs, names, 'Location', 'northwest', 'Box', 'on');
-                lg.AutoUpdate = 'off';
-                lg.Interpreter = 'latex';
-            end
         end
 
         %% -------------------- Update per frame --------------------
@@ -1170,21 +1034,14 @@ classdef KinematicsApp < matlab.apps.AppBase
                 [x0, y0] = getX0Y0(app);
 
                 % Pathline: advance single particle with RK4, append to path every pathStride ticks
-                [xn, yn] = rk4Particle(app, app.pathX(end), app.pathY(end), t0, dt);
+                [xn, yn] = rk4(app, app.pathX(end), app.pathY(end), t0, dt);
+                app.pathX(end + 1) = xn;
+                app.pathY(end + 1) = yn;
 
-                if mod(double(app.tickCount), app.pathStride) == 0
-                    app.pathX(end + 1) = xn;
-                    app.pathY(end + 1) = yn;
-
-                    np = numel(app.pathX);
-                    if np > app.maxPathPts
-                        app.pathX = app.pathX(np - app.maxPathPts + 1:np);
-                        app.pathY = app.pathY(np - app.maxPathPts + 1:np);
-                    end
-                else
-                    % keep marker moving even if not storing this tick
-                    app.pathX(end) = xn;
-                    app.pathY(end) = yn;
+                np = numel(app.pathX);
+                if np > app.maxPathPts
+                    app.pathX = app.pathX(np - app.maxPathPts + 1:np);
+                    app.pathY = app.pathY(np - app.maxPathPts + 1:np);
                 end
 
                 % Streakline: release new particles at fixed time intervals, then advect all
@@ -1198,10 +1055,10 @@ classdef KinematicsApp < matlab.apps.AppBase
                         app.streakX = app.streakX(ns - app.maxStreakPts + 1:ns);
                         app.streakY = app.streakY(ns - app.maxStreakPts + 1:ns);
                     end
-
                 end
 
-                [app.streakX, app.streakY] = rk4Particle(app, app.streakX, app.streakY, t0, dt);
+                % Streak advect
+                [app.streakX, app.streakY] = rk4(app, app.streakX, app.streakY, t0, dt);
             end
 
             % Push data to graphics
@@ -1229,15 +1086,8 @@ classdef KinematicsApp < matlab.apps.AppBase
         end
 
         %% -------------------- Timer --------------------
-        function onRun(app)
-            % Run button callback
-            startTimer(app);
-        end
-
-        function onStop(app)
-            % Stop button callback
-            stopTimer(app);
-        end
+        function onRun(app),  startTimer(app); end
+        function onStop(app), stopTimer(app);  end
 
         function startTimer(app)
             % Start (or restart) the fixed-rate timer
@@ -1248,7 +1098,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             stopTimer(app);
             app.isRunning = true;
 
-            dt = 1 / app.fpsConst;
+            dt = 1 / app.FPS;
             dt = round(dt * 1000) / 1000;
             dt = max(dt, 0.001);
 
@@ -1262,23 +1112,15 @@ classdef KinematicsApp < matlab.apps.AppBase
 
         function stopTimer(app)
             % Stop and delete timer safely
-
             app.isRunning = false;
 
             if ~isempty(app.Tmr) && isvalid(app.Tmr)
-                try
-                    stop(app.Tmr);
-                catch
-                end
-
+                try, stop(app.Tmr); catch, end
                 if app.isTicking
                     return;
                 end
-                try
-                    delete(app.Tmr);
-                catch
-                end
 
+                try, delete(app.Tmr); catch, end
             end
 
             app.Tmr = timer.empty;
@@ -1289,7 +1131,6 @@ classdef KinematicsApp < matlab.apps.AppBase
             %
             % Args:
             %     dt (double): timer period (time increment)
-
             if app.isTicking
                 return;
             end
