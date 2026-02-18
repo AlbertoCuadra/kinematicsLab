@@ -55,16 +55,17 @@ classdef KinematicsApp < matlab.apps.AppBase
 
     properties (Access = private)
         % Fixed simulation settings
-        FPS double = 30               % Fixed FPS
+        FPS double = 60               % Fixed FPS
         TMAX double = 12              % Used only for axis sizing in uniform cases
 
         % Streamlines
-        numStream int32 = 9           % Number of streamlines
+        numStream int32 = 6           % Number of streamlines
 
         % Performance limits
-        maxPathPts double = 6000      % Pathline polyline points
-        maxStreakPts double = 1200    % Streak particles kept
-        tickCount uint64 = uint64(0)  % Number of ticks since the start of the simulation
+        numPointsPathline double = 3000  % Pathline polyline points
+        dtPathline double = 1/60         % Pathline precompute dt [s]
+        maxStreakPts double = 1200       % Streak particles kept
+        tickCount uint64 = uint64(0)     % Number of ticks since the start of the simulation
 
         % Timer
         Tmr = timer.empty             % Timer object for the simulation loop
@@ -100,12 +101,28 @@ classdef KinematicsApp < matlab.apps.AppBase
         % Histories
         pathX double = 0              % Pathline history of x positions
         pathY double = 0              % Pathline history of y positions
+        pathT double = 0              % Pathline history of time samples
+        pathBox double = [0 0 0 0]    % Pathline bounding box used for validity checks
         streakX double = 0            % Streakline history of x positions
         streakY double = 0            % Streakline history of y positions
         lastReleaseT double = 0       % Last time a streak particle was released
 
         % UI style
         fontsizeLabels = 18           % Font size for labels and buttons
+
+        % View behaviour
+        qNx double = 14               % Quiver grid size in x
+        qNy double = 10               % Quiver grid size in y
+        viewDirty logical = false          
+        lastViewApplyT double = 0
+        viewApplyMinPeriod double = 1/20  % seconds (20 Hz max)
+
+        % Listeners
+        xLimListener event.listener = event.listener.empty
+        yLimListener event.listener = event.listener.empty
+
+        % Problem ID
+        problemID uint8 = 1
     end
 
     methods (Access = public)
@@ -345,6 +362,13 @@ classdef KinematicsApp < matlab.apps.AppBase
             % Callback for parameter changes (problem / V0 / x0 / y0 / omega).
             % Stops simulation, resets all graphics & histories, keeps running if it was running.
             wasRunning = app.isRunning;
+
+            % Cache problem as an integer
+            app.problemID = uint8(find(strcmp(app.ProblemDropDown.Value, app.ProblemDropDown.Items), 1, 'first'));
+            if isempty(app.problemID)
+                app.problemID = uint8(1);
+            end
+
             updateOmegaEnable(app);
             updateV0Enable(app);
             resetAll(app);
@@ -428,39 +452,38 @@ classdef KinematicsApp < matlab.apps.AppBase
             % Definitions
             V0 = app.V0Field.Value;
             om = app.OmegaField.Value;
-            problemCase = app.ProblemDropDown.Value;
 
-            % Get velocity components
-            switch problemCase
-                case 'Unsteady uniform: u=V0, v=V0 sin(ωt)'
+            % Get velocity components (switch on cached numeric id)
+            switch app.problemID
+                case 1  % Unsteady uniform: u=V0, v=V0 sin(ωt)
                     u = V0 + 0 * x;
                     v = V0 * sin(om * t) + 0 * y;
 
-                case 'Steady uniform: u=V0, v=0'
+                case 2  % Steady uniform: u=V0, v=0
                     u = V0 + 0 * x;
                     v = 0 + 0 * y;
 
-                case 'Steady saddle: u=x, v=-y'
+                case 3  % Steady saddle: u=x, v=-y
                     u = x;
                     v = -y;
 
-                case 'Steady source: u=x, v=y'
+                case 4  % Steady source: u=x, v=y
                     u = x;
                     v = y;
 
-                case 'Steady rotation: u=y, v=-x'
+                case 5  % Steady rotation: u=y, v=-x
                     u = y;
                     v = -x;
 
-                case 'Steady shear: u=V0, v=V0 x'
+                case 6  % Steady shear: u=V0, v=V0 x
                     u = V0 + 0 * x;
                     v = V0 * x;
 
-                case 'Steady cellular: u=cos(ωx), v=sin(ωy)'
+                case 7  % Steady cellular: u=cos(ωx), v=sin(ωy)
                     u = cos(om * x);
                     v = sin(om * y);
 
-                case 'Steady polynomial: u=(x^2+x-2)(x^2+x-12), v=y-3x+7'
+                case 8  % Steady polynomial: u=(x^2+x-2)(x^2+x-12), v=y-3x+7
                     u = (x.^2 + x - 2) .* (x.^2 + x - 12);
                     v = y - 3 * x + 7;
 
@@ -489,6 +512,65 @@ classdef KinematicsApp < matlab.apps.AppBase
 
             xn = x + dt * (k1x + 2 * k2x + 2 * k3x + k4x) / 6;
             yn = y + dt * (k1y + 2 * k2y + 2 * k3y + k4y) / 6;
+        end
+
+        %% -------------------- Pathline (precompute + marker) --------------------
+        function precomputePathline(app)
+            % Precompute a pathline from t=0 using a fixed number of samples.
+            %
+            % Notes:
+            %   * This draws the pathline "to infinity" in practice by choosing
+            %     numPointsPathline and dtPathline sufficiently large/small.
+            %   * The marker position is later interpolated from (pathT,pathX,pathY).
+
+            [x0, y0] = getX0Y0(app);
+
+            N = max(2, round(app.numPointsPathline));
+            dt = max(1e-4, app.dtPathline);
+
+            app.pathX = nan(1, N);
+            app.pathY = nan(1, N);
+            app.pathT = nan(1, N);
+
+            app.pathX(1) = x0;
+            app.pathY(1) = y0;
+            app.pathT(1) = 0;
+
+            % Bounding box used only to decide if a zoom-out should trigger recompute.
+            xl = app.Axes.XLim; yl = app.Axes.YLim;
+            cx = mean(xl); cy = mean(yl);
+            rx = 1.5 * 0.5 * diff(xl);
+            ry = 1.5 * 0.5 * diff(yl);
+            app.pathBox = [cx - rx, cx + rx, cy - ry, cy + ry];
+
+            for k = 2:N
+                [xn, yn] = rk4(app, app.pathX(k-1), app.pathY(k-1), app.pathT(k-1), dt);
+                app.pathX(k) = xn;
+                app.pathY(k) = yn;
+                app.pathT(k) = app.pathT(k-1) + dt;
+            end
+        end
+
+        function [xp, yp] = pathPosAtTime(app, tNow)
+            % Interpolate precomputed pathline to get marker position at time tNow.
+
+            if isempty(app.pathT) || numel(app.pathT) < 2
+                [x0, y0] = getX0Y0(app);
+                xp = x0; yp = y0;
+                return
+            end
+
+            dt = app.dtPathline;
+            N  = numel(app.pathX);
+
+            s = tNow / dt;
+            i = floor(s) + 1;
+            if i < 1, xp = app.pathX(1); yp = app.pathY(1); return; end
+            if i >= N, xp = app.pathX(end); yp = app.pathY(end); return; end
+
+            a = s - floor(s);  % in [0,1)
+            xp = (1-a)*app.pathX(i) + a*app.pathX(i+1);
+            yp = (1-a)*app.pathY(i) + a*app.pathY(i+1);
         end
 
         %% -------------------- Streamlines numeric helpers --------------------
@@ -520,79 +602,70 @@ classdef KinematicsApp < matlab.apps.AppBase
             % Returns:
             %     xs, ys (double): polyline describing the streamline
 
-            ds = 0.03 * max(app.xMax - app.xMin, app.yMax - app.yMin);
-            ds = max(ds, 0.02);
-            maxN = 700;
+            % Definitions
+            dom = max(app.xMax - app.xMin, app.yMax - app.yMin);
+            ds   = max(0.03 * dom, 0.02);
+            maxN = 200;
+            vTol = 1e-10;
+            margin = 0.5;
 
-            % Backward integration
-            xb = x0;
-            yb = y0;
-            Xb = nan(maxN, 1);
-            Yb = nan(maxN, 1);
-            Xb(1) = xb;
-            Yb(1) = yb;
-            nb = 1;
+            % Cache bounds and constants
+            xLo = app.xMin - margin;  xHi = app.xMax + margin;
+            yLo = app.yMin - margin;  yHi = app.yMax + margin;
 
-            for k = 2:maxN
-                [xb, yb, ok] = stepStream(app, xb, yb, tFix, -ds);
-                if ~ok
-                    break;
-                end
-                nb = nb + 1;
-                Xb(nb) = xb;
-                Yb(nb) = yb;
-            end
+            % Preallocate
+            Xb = zeros(maxN, 1); Yb = zeros(maxN, 1);
+            Xf = zeros(maxN, 1); Yf = zeros(maxN, 1);
 
-            % Forward integration
-            xf = x0;
-            yf = y0;
-            Xf = nan(maxN, 1);
-            Yf = nan(maxN, 1);
-            Xf(1) = xf;
-            Yf(1) = yf;
-            nf = 1;
+            Xb(1) = x0; Yb(1) = y0; nb = 1;
+            Xf(1) = x0; Yf(1) = y0; nf = 1;
 
-            for k = 2:maxN
-                [xf, yf, ok] = stepStream(app, xf, yf, tFix, +ds);
-                if ~ok
-                    break;
-                end
-                nf = nf + 1;
-                Xf(nf) = xf;
-                Yf(nf) = yf;
-            end
+            % Integrate backward and forward
+            [Xb, Yb, nb] = integrateDir(x0, y0, -ds, Xb, Yb, nb);
+            [Xf, Yf, nf] = integrateDir(x0, y0, +ds, Xf, Yf, nf);
 
             % Merge (avoid duplicating seed point)
-            Xb = flipud(Xb(1:nb));
-            Yb = flipud(Yb(1:nb));
-            Xf = Xf(2:nf);
-            Yf = Yf(2:nf);
+            xs = [flipud(Xb(1:nb)); Xf(2:nf)];
+            ys = [flipud(Yb(1:nb)); Yf(2:nf)];
 
-            xs = [Xb; Xf];
-            ys = [Yb; Yf];
+            % NESTED FUNCTIONS
+            function [X, Y, n] = integrateDir(x, y, h, X, Y, n)
+                for k = 2:maxN
+                    [x, y, ok] = rk4Step(x, y, h);
+                    if ~ok
+                        break;
+                    end
+                    n = n + 1;
+                    X(n) = x;
+                    Y(n) = y;
+                end
+            end
 
-            function [xn, yn, ok] = stepStream(appObj, x, y, tF, h)
-                % One RK4 step in arclength parameter s for the unit direction field
-                [d1x, d1y] = appObj.unitDir(x, y, tF);
-                [d2x, d2y] = appObj.unitDir(x + 0.5 * h * d1x, y + 0.5 * h * d1y, tF);
-                [d3x, d3y] = appObj.unitDir(x + 0.5 * h * d2x, y + 0.5 * h * d2y, tF);
-                [d4x, d4y] = appObj.unitDir(x + h * d3x, y + h * d3y, tF);
+            function [xn, yn, ok] = rk4Step(x, y, h)
+                % One RK4 step: dX/ds = unitDir(X), with step h (±ds).
 
-                xn = x + h * (d1x + 2 * d2x + 2 * d3x + d4x) / 6;
-                yn = y + h * (d1y + 2 * d2y + 2 * d3y + d4y) / 6;
+                [d1x, d1y] = app.unitDir(x, y, tFix);
 
-                margin = 0.5;
-                ok = xn >= (appObj.xMin - margin) && xn <= (appObj.xMax + margin) && ...
-                     yn >= (appObj.yMin - margin) && yn <= (appObj.yMax + margin);
+                if ~(isfinite(d1x) && isfinite(d1y))
+                    xn = x; yn = y; ok = false; return;
+                end
 
+                [d2x, d2y] = app.unitDir(x + 0.5*h*d1x, y + 0.5*h*d1y, tFix);
+                [d3x, d3y] = app.unitDir(x + 0.5*h*d2x, y + 0.5*h*d2y, tFix);
+                [d4x, d4y] = app.unitDir(x + h*d3x, y + h*d3y, tFix);
+
+                xn = x + h * (d1x + 2*(d2x + d3x) + d4x) / 6;
+                yn = y + h * (d1y + 2*(d2y + d3y) + d4y) / 6;
+
+                % Domain check
+                ok = (xn >= xLo) && (xn <= xHi) && (yn >= yLo) && (yn <= yHi);
                 if ~ok
                     return;
                 end
 
-                [ux, uy] = appObj.velocity(xn, yn, tF);
-                if hypot(ux, uy) < 1e-10
-                    ok = false;
-                end
+                % Stop if velocity magnitude is effectively zero
+                [ux, uy] = app.velocity(xn, yn, tFix);
+                ok = hypot(ux, uy) >= vTol;
             end
         end
 
@@ -607,11 +680,11 @@ classdef KinematicsApp < matlab.apps.AppBase
             % Definitions
             V0 = app.V0Field.Value;
             om = app.OmegaField.Value;
-            val = app.ProblemDropDown.Value;
+            problemID = app.problemID;
             [x0, y0] = getX0Y0(app);
 
-            switch val
-                case 'Unsteady uniform: u=V0, v=V0 sin(ωt)'
+            switch problemID
+                case 1
                     Vabs = abs(V0);
                     app.xMin = x0 - Vabs * max(app.TMAX, 0) - 1;
                     app.xMax = x0 + Vabs * max(app.TMAX, 0) + 1;
@@ -626,14 +699,14 @@ classdef KinematicsApp < matlab.apps.AppBase
                     app.yMin = y0 - 1.2 * A - 1;
                     app.yMax = y0 + 1.2 * A + 1;
 
-                case 'Steady uniform: u=V0, v=0'
+                case 2
                     Vabs = abs(V0);
                     app.xMin = x0 - Vabs * max(app.TMAX, 0) - 1;
                     app.xMax = x0 + Vabs * max(app.TMAX, 0) + 1;
                     app.yMin = y0 - 4;
                     app.yMax = y0 + 4;
 
-                case 'Steady cellular: u=cos(ωx), v=sin(ωy)'
+                case 7
                     K = max(abs(om), 0.5);
                     L = 2 * pi / K;
                     app.xMin = x0 - L;
@@ -641,7 +714,7 @@ classdef KinematicsApp < matlab.apps.AppBase
                     app.yMin = y0 - L;
                     app.yMax = y0 + L;
 
-                case 'Steady polynomial: u=(x^2+x-2)(x^2+x-12), v=y-3x+7'
+                case 8
                     app.xMin = min(-6, x0 - 1);
                     app.xMax = max( 6, x0 + 1);
                     app.yMin = min(-22, y0 - 1);
@@ -655,6 +728,73 @@ classdef KinematicsApp < matlab.apps.AppBase
             end
         end
 
+        %% -------------------- View-dependent quiver --------------------
+        function installViewListeners(app)
+            if ~isempty(app.xLimListener) && isvalid(app.xLimListener), return; end
+            app.xLimListener = addlistener(app.Axes, 'XLim', 'PostSet', @(~,~) markViewDirty(app));
+            app.yLimListener = addlistener(app.Axes, 'YLim', 'PostSet', @(~,~) markViewDirty(app));
+        end
+
+        function onViewChanged(app)
+            if app.isResetting || ~isgraphics(app.Axes)
+                return
+            end
+
+            xl = app.Axes.XLim; yl = app.Axes.YLim;
+            app.xMin = xl(1); app.xMax = xl(2);
+            app.yMin = yl(1); app.yMax = yl(2);
+
+            rebuildQuiverGrid(app);
+            refreshQuiver(app);
+
+            % Streamlines depend on xMin/xMax/yMin/yMax
+            updateStreamlines(app);
+
+            % If user zooms out a lot, recompute the precomputed pathline so it remains representative.
+            if ~isPathBoxCoveringView(app)
+                precomputePathline(app);
+                if ~isempty(app.pathLine) && isgraphics(app.pathLine)
+                    set(app.pathLine, 'XData', app.pathX, 'YData', app.pathY);
+                end
+            end
+
+        end
+
+        function tf = isPathBoxCoveringView(app)
+            if numel(app.pathBox) ~= 4
+                tf = false;
+                return
+            end
+            xl = app.Axes.XLim; yl = app.Axes.YLim;
+            tf = (xl(1) >= app.pathBox(1)) && (xl(2) <= app.pathBox(2)) && ...
+                 (yl(1) >= app.pathBox(3)) && (yl(2) <= app.pathBox(4));
+        end
+
+        function rebuildQuiverGrid(app)
+            % Always build grid based on current view limits
+            xl = app.Axes.XLim; yl = app.Axes.YLim;
+            [app.xg, app.yg] = meshgrid( ...
+                linspace(xl(1), xl(2), app.qNx), ...
+                linspace(yl(1), yl(2), app.qNy));
+        end
+
+        function refreshQuiver(app)
+            % Create/update quiver using the current grid
+            [u, v] = app.velocity(app.xg, app.yg, app.t);
+
+            if isempty(app.qh) || ~isgraphics(app.qh)
+                app.qh = quiver(app.Axes, app.xg, app.yg, u, v, 'AutoScale', 'on');
+                app.qh.DisplayName = 'Velocity field';
+                app.qh.HandleVisibility = 'on';
+                app.qh.HitTest = 'off';
+                app.qh.PickableParts = 'none';
+
+                return
+            end
+
+            set(app.qh, 'XData', app.xg, 'YData', app.yg, 'UData', u, 'VData', v);
+        end
+
         %% -------------------- Plot setup --------------------
         function resetAll(app)
             % Full reset: stop timer, clear axes, recreate graphics, reset histories
@@ -663,7 +803,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             %   * This is the ONLY operation that resets time and traces
 
             if app.isResetting
-                return;
+                return
             end
             app.isResetting = true;
             c = onCleanup(@() setResetFalse(app)); %#ok<NASGU>
@@ -703,6 +843,7 @@ classdef KinematicsApp < matlab.apps.AppBase
 
             app.pathX = x0;
             app.pathY = y0;
+            app.pathT = 0;
 
             app.streakX = x0;
             app.streakY = y0;
@@ -714,19 +855,19 @@ classdef KinematicsApp < matlab.apps.AppBase
             computeAxisLimits(app);
             axis(app.Axes, [app.xMin, app.xMax, app.yMin, app.yMax]);
 
-            % Quiver grid
-            [app.xg, app.yg] = meshgrid( ...
-                linspace(app.xMin, app.xMax, 14), ...
-                linspace(app.yMin, app.yMax, 10));
-            [u, v] = app.velocity(app.xg, app.yg, app.t);
+            % Keep quiver in sync with zoom/pan
+            installViewListeners(app);
 
-            app.qh = quiver(app.Axes, app.xg, app.yg, u, v, 'AutoScale', 'on');
-            app.qh.DisplayName = 'Velocity field';
-            app.qh.HandleVisibility = 'on';
+            % Quiver grid
+            rebuildQuiverGrid(app);
+            refreshQuiver(app);
 
             % Source / release point
             app.srcDot = plot(app.Axes, x0, y0, 'ko', 'MarkerFaceColor', 'k', 'MarkerSize', 6);
             app.srcDot.HandleVisibility = 'off';
+
+            % Precompute pathline polyline once (marker will move with time)
+            precomputePathline(app);
 
             ensureStreamObjects(app);
             ensurePathObjects(app);
@@ -752,13 +893,15 @@ classdef KinematicsApp < matlab.apps.AppBase
         function ensureStreamObjects(app)
             % Create streamline line objects (one per streamline)
             if ~isempty(app.streamH) && all(isgraphics(app.streamH))
-                return;
+                return
             end
 
             app.streamH = gobjects(app.numStream, 1);
             for i = 1:app.numStream
                 app.streamH(i) = plot(app.Axes, nan, nan, '-', 'LineWidth', 1.2);
                 app.streamH(i).HandleVisibility = 'off';
+                app.streamH(i).HitTest = 'off';
+                app.streamH(i).PickableParts = 'none';
             end
         end
 
@@ -766,26 +909,31 @@ classdef KinematicsApp < matlab.apps.AppBase
             % Create pathline polyline and particle marker
             if ~isempty(app.pathLine) && isgraphics(app.pathLine) && ...
                ~isempty(app.pDot) && isgraphics(app.pDot)
-                return;
+                return
             end
 
             app.pathLine = plot(app.Axes, app.pathX, app.pathY, '-', 'LineWidth', 2.2, 'DisplayName', 'Pathline');
-            app.pDot = plot(app.Axes, app.pathX(end), app.pathY(end), 'o', ...
+            app.pDot = plot(app.Axes, app.pathX(1), app.pathY(1), 'o', ...
                 'MarkerFaceColor', app.PathColorPicker.Value, 'MarkerSize', 7);
             app.pDot.HandleVisibility = 'off';
+            app.pathLine.HitTest = 'off';  app.pathLine.PickableParts = 'none';
+            app.pDot.HitTest = 'off';      app.pDot.PickableParts = 'none';
         end
 
         function ensureStreakObjects(app)
             % Create streakline polyline and scatter points
             if ~isempty(app.streakLine) && isgraphics(app.streakLine) && ...
                ~isempty(app.streakDots) && isgraphics(app.streakDots)
-                return;
+                return
             end
 
             app.streakLine = plot(app.Axes, app.streakX, app.streakY, '-', 'LineWidth', 2.2, 'DisplayName', 'Streakline');
-            app.streakDots = scatter(app.Axes, app.streakX, app.streakY, 22, 'filled', ...
-                'MarkerFaceAlpha', 0.6, 'MarkerEdgeAlpha', 0.6);
+            app.streakDots = plot(app.Axes, app.streakX, app.streakY, 'o', ...
+                'LineStyle','none', 'MarkerSize', 4, 'MarkerFaceColor', app.StreakColorPicker.Value, ...
+                'MarkerEdgeColor', app.StreakColorPicker.Value);
             app.streakDots.HandleVisibility = 'off';
+            app.streakLine.HitTest = 'off'; app.streakLine.PickableParts = 'none';
+            app.streakDots.HitTest = 'off'; app.streakDots.PickableParts = 'none';
         end
 
         %% -------------------- Streamlines (analytic where possible) --------------------
@@ -798,13 +946,13 @@ classdef KinematicsApp < matlab.apps.AppBase
             %   * Fallback: numeric streamline integration
 
             if isempty(app.streamH) || ~all(isgraphics(app.streamH))
-                return;
+                return
             end
 
             % Definitions
             n = numel(app.streamH);
             val = app.ProblemDropDown.Value;
-            x = linspace(app.xMin, app.xMax, 1500);
+            x = linspace(app.xMin, app.xMax, 200);
 
             switch val
 
@@ -842,7 +990,7 @@ classdef KinematicsApp < matlab.apps.AppBase
                     if n >= 1
                         setLine(1, x, 0 * x); % y = 0
                     end
-                    
+
                     if n >= 2
                         yAxis = linspace(app.yMin, app.yMax, 800);
                         setLine(2, 0 * yAxis, yAxis); % x = 0
@@ -897,8 +1045,8 @@ classdef KinematicsApp < matlab.apps.AppBase
                         for i = 1:n
                             setLine(i, x, C(i) + 0*x);
                         end
-                        
-                        return;
+
+                        return
                     end
 
                     y0Targets = linspace(app.yMin, app.yMax, n);
@@ -1001,7 +1149,7 @@ classdef KinematicsApp < matlab.apps.AppBase
         end
 
         function updateTitle(app)
-            % Update title with current time and velocity info      
+            % Update title with current time and velocity info
             timeLine = sprintf('$t = %.2f\\,\\mathrm{s}$', app.t);
             app.Axes.Title.String = timeLine;
         end
@@ -1014,19 +1162,30 @@ classdef KinematicsApp < matlab.apps.AppBase
             %     dt (double): time step used for advection (0 for a "refresh")
 
             if app.isResetting || ~isgraphics(app.Axes)
-                return;
+                return
+            end
+
+            % Apply view changes at most every viewApplyMinPeriod
+            if app.viewDirty && (app.t - app.lastViewApplyT) >= app.viewApplyMinPeriod
+                app.viewDirty = false;
+                app.lastViewApplyT = app.t;
+                onViewChanged(app);
             end
 
             % Update quiver
-            if ~isempty(app.qh) && isgraphics(app.qh)
+            if ~isempty(app.qh) && isgraphics(app.qh) && app.VelCheckBox.Value && app.isUnsteady()
                 [u, v] = app.velocity(app.xg, app.yg, app.t);
                 set(app.qh, 'UData', u, 'VData', v);
             end
 
             % Update streamlines only if unsteady
-            if app.isUnsteady()
+            if app.isUnsteady() && app.StreamCheckBox.Value
                 updateStreamlines(app);
             end
+
+            % NOTE: The pathline curve is precomputed from t=0 and stays fixed;
+            %       only the marker position depends on the current app.t.
+            [xp, yp] = pathPosAtTime(app, app.t);
 
             if dt > 0
                 app.tickCount = app.tickCount + 1;
@@ -1034,27 +1193,18 @@ classdef KinematicsApp < matlab.apps.AppBase
                 t0 = app.t - dt;
                 [x0, y0] = getX0Y0(app);
 
-                % Pathline: advance single particle with RK4, append to path every pathStride ticks
-                [xn, yn] = rk4(app, app.pathX(end), app.pathY(end), t0, dt);
-                app.pathX(end + 1) = xn;
-                app.pathY(end + 1) = yn;
-
-                np = numel(app.pathX);
-                if np > app.maxPathPts
-                    app.pathX = app.pathX(np - app.maxPathPts + 1:np);
-                    app.pathY = app.pathY(np - app.maxPathPts + 1:np);
-                end
-
                 % Streakline: release new particles at fixed time intervals, then advect all
-                while (app.t - app.lastReleaseT) >= app.dtRel
-                    app.streakX(end + 1) = x0;
-                    app.streakY(end + 1) = y0;
-                    app.lastReleaseT = app.lastReleaseT + app.dtRel;
+                nNew = floor((app.t - app.lastReleaseT) / app.dtRel);
+                if nNew > 0
+                    [x0,y0] = getX0Y0(app);
+                    app.streakX = [app.streakX, repmat(x0, 1, nNew)];
+                    app.streakY = [app.streakY, repmat(y0, 1, nNew)];
+                    app.lastReleaseT = app.lastReleaseT + nNew * app.dtRel;
 
                     ns = numel(app.streakX);
                     if ns > app.maxStreakPts
-                        app.streakX = app.streakX(ns - app.maxStreakPts + 1:ns);
-                        app.streakY = app.streakY(ns - app.maxStreakPts + 1:ns);
+                        app.streakX = app.streakX(ns - app.maxStreakPts + 1 : ns);
+                        app.streakY = app.streakY(ns - app.maxStreakPts + 1 : ns);
                     end
                 end
 
@@ -1063,19 +1213,15 @@ classdef KinematicsApp < matlab.apps.AppBase
             end
 
             % Push data to graphics
-            if ~isempty(app.pathLine) && isgraphics(app.pathLine)
-                set(app.pathLine, 'XData', app.pathX, 'YData', app.pathY);
+            if ~isempty(app.pDot) && isgraphics(app.pDot) && app.PathCheckBox.Value
+                set(app.pDot, 'XData', xp, 'YData', yp);
             end
 
-            if ~isempty(app.pDot) && isgraphics(app.pDot)
-                set(app.pDot, 'XData', app.pathX(end), 'YData', app.pathY(end));
-            end
-
-            if ~isempty(app.streakLine) && isgraphics(app.streakLine)
+            if ~isempty(app.streakLine) && isgraphics(app.streakLine) && app.StreakCheckBox.Value
                 set(app.streakLine, 'XData', app.streakX, 'YData', app.streakY);
             end
 
-            if ~isempty(app.streakDots) && isgraphics(app.streakDots)
+            if ~isempty(app.streakDots) && isgraphics(app.streakDots) && app.StreakCheckBox.Value
                 set(app.streakDots, 'XData', app.streakX, 'YData', app.streakY);
             end
 
@@ -1095,7 +1241,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             %
             % Notes:
             %   * Period is quantized to milliseconds to avoid MATLAB timer warnings
-            
+
             stopTimer(app);
             app.isRunning = true;
 
@@ -1118,7 +1264,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             if ~isempty(app.Tmr) && isvalid(app.Tmr)
                 try, stop(app.Tmr); catch, end
                 if app.isTicking
-                    return;
+                    return
                 end
 
                 try, delete(app.Tmr); catch, end
@@ -1133,14 +1279,14 @@ classdef KinematicsApp < matlab.apps.AppBase
             % Args:
             %     dt (double): timer period (time increment)
             if app.isTicking
-                return;
+                return
             end
 
             app.isTicking = true;
             c = onCleanup(@() setTickFalse(app));
 
             if app.isResetting || ~app.isRunning || ~isgraphics(app.Axes)
-                return;
+                return
             end
 
             app.t = app.t + dt;
@@ -1154,6 +1300,10 @@ classdef KinematicsApp < matlab.apps.AppBase
                 appObj.isTicking = false;
             end
 
+        end
+
+        function markViewDirty(app)
+            app.viewDirty = true;
         end
 
     end
