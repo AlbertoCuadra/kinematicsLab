@@ -54,76 +54,71 @@ classdef KinematicsApp < matlab.apps.AppBase
     end
 
     properties (Access = private)
-        % Fixed simulation settings
-        FPS double = 60               % Fixed FPS
-        TMAX double = 12              % Used only for axis sizing in uniform cases
+        % Simulation settings
+        FPS double = 60                  % Fixed simulation frame rate [Hz]
+        TMAX double = 12                 % Reference max time (used only for axis sizing in uniform flows)
+        DTSTREAK double = 0.2            % Time interval between streak particle releases [s]
+        DTPATHLINE double = 1/60         % Time step used for pathline precomputation [s]
+        numPointsPathline double = 1000  % Maximum number of points stored for a pathline polyline
+        maxStreakPts double = 1200       % Maximum number of streak particles retained
+        tickCount uint64 = uint64(0)     % Total number of simulation ticks since start
+        numStreamlines int32 = 6         % Number of streamlines to display
 
-        % Streamlines
-        numStream int32 = 6           % Number of streamlines
+        % Timer / simulation state
+        Tmr = timer.empty                % Timer object driving the simulation loop
+        t double = 0                     % Current simulation time [s]
+        isRunning logical = false        % True when the simulation is running
 
-        % Performance limits
-        numPointsPathline double = 3000  % Pathline polyline points
-        dtPathline double = 1/60         % Pathline precompute dt [s]
-        maxStreakPts double = 1200       % Streak particles kept
-        tickCount uint64 = uint64(0)     % Number of ticks since the start of the simulation
-
-        % Timer
-        Tmr = timer.empty             % Timer object for the simulation loop
-        t double = 0                  % Simulation time (seconds)
-        isRunning logical = false     % Flag for simulation state
-
-        % Guards
-        isResetting logical = false   % Flag to avoid running the timer callback during reset
-        isTicking logical = false     % Flag to avoid running the reset callback during timer tick
+        % Re-entrancy guards
+        isResetting logical = false      % Prevents timer callback execution during reset
+        isTicking logical = false        % Prevents reset execution during timer callback
 
         % Graphics handles
-        qh
-        srcDot
-        streamH = gobjects(0)         % Streamlines lines
-        pathLine                      % Pathline
-        pDot                          % Particle marker
-        streakLine                    % Streakline
-        streakDots                    % Streakdots
+        qh                               % Quiver plot handle (velocity field)
+        srcDot                           % Source point marker handle
+        streamH = gobjects(0)            % Streamline line object handles
+        pathLine                         % Pathline polyline handle
+        pDot                             % Pathline particle marker handle
+        streakLine                       % Streakline polyline handle
+        streakDots                       % Streak particle marker handles
 
-        % Streak release
-        dtRel double = 0.12           % Streak release interval (seconds)
-
-        % Grid for quiver
-        xg double
-        yg double
+        % Grid for quiver visualization
+        xg double                        % Quiver grid x-coordinates
+        yg double                        % Quiver grid y-coordinates
 
         % Axis limits
-        xMin double
-        xMax double
-        yMin double
-        yMax double
+        xMin double                      % Minimum x-axis limit
+        xMax double                      % Maximum x-axis limit
+        yMin double                      % Minimum y-axis limit
+        yMax double                      % Maximum y-axis limit
 
         % Histories
-        pathX double = 0              % Pathline history of x positions
-        pathY double = 0              % Pathline history of y positions
-        pathT double = 0              % Pathline history of time samples
-        pathBox double = [0 0 0 0]    % Pathline bounding box used for validity checks
-        streakX double = 0            % Streakline history of x positions
-        streakY double = 0            % Streakline history of y positions
-        lastReleaseT double = 0       % Last time a streak particle was released
+        pathX double = 0                 % Pathline history: x positions
+        pathY double = 0                 % Pathline history: y positions
+        pathT double = 0                 % Pathline history: time samples
+        pathBox double = [0 0 0 0]       % Pathline bounding box (used for validity / clipping checks)
+        streakX double = 0               % Streakline history: x positions
+        streakY double = 0               % Streakline history: y positions
+        lastReleaseT double = 0          % Time of last streak particle release
 
-        % UI style
-        fontsizeLabels = 18           % Font size for labels and buttons
+        % UI styling
+        fontsizeLabels = 18              % Font size for axis labels and UI controls
 
-        % View behaviour
-        qNx double = 14               % Quiver grid size in x
-        qNy double = 10               % Quiver grid size in y
-        viewDirty logical = false          
-        lastViewApplyT double = 0
-        viewApplyMinPeriod double = 1/20  % seconds (20 Hz max)
+        % View / camera behaviour
+        qNx double = 14                  % Number of quiver grid points in x
+        qNy double = 10                  % Number of quiver grid points in y
+        viewDirty logical = false        % Indicates pending view update (axis/grid change)
+        lastViewApplyT double = 0        % Time when the view was last applied
+        viewApplyMinPeriod double = 1/20 % Minimum interval between view updates [s] (max 20 Hz)
 
-        % Listeners
-        xLimListener event.listener = event.listener.empty
-        yLimListener event.listener = event.listener.empty
+        % Axis listeners
+        xLimListener event.listener = event.listener.empty  % Listener for x-axis limit changes
+        yLimListener event.listener = event.listener.empty  % Listener for y-axis limit changes
 
         % Problem ID
-        problemID uint8 = 1
+        problemID uint8 = 1              % Identifier for the active flow/problem setup
     end
+
 
     methods (Access = public)
         function app = KinematicsApp
@@ -520,13 +515,13 @@ classdef KinematicsApp < matlab.apps.AppBase
             %
             % Notes:
             %   * This draws the pathline "to infinity" in practice by choosing
-            %     numPointsPathline and dtPathline sufficiently large/small.
+            %     numPointsPathline and DTPATHLINE sufficiently large/small.
             %   * The marker position is later interpolated from (pathT,pathX,pathY).
 
             [x0, y0] = getX0Y0(app);
 
             N = max(2, round(app.numPointsPathline));
-            dt = max(1e-4, app.dtPathline);
+            dt = max(1e-4, app.DTPATHLINE);
 
             app.pathX = nan(1, N);
             app.pathY = nan(1, N);
@@ -560,7 +555,7 @@ classdef KinematicsApp < matlab.apps.AppBase
                 return
             end
 
-            dt = app.dtPathline;
+            dt = app.DTPATHLINE;
             N  = numel(app.pathX);
 
             s = tNow / dt;
@@ -896,8 +891,8 @@ classdef KinematicsApp < matlab.apps.AppBase
                 return
             end
 
-            app.streamH = gobjects(app.numStream, 1);
-            for i = 1:app.numStream
+            app.streamH = gobjects(app.numStreamlines, 1);
+            for i = 1:app.numStreamlines
                 app.streamH(i) = plot(app.Axes, nan, nan, '-', 'LineWidth', 1.2);
                 app.streamH(i).HandleVisibility = 'off';
                 app.streamH(i).HitTest = 'off';
@@ -1194,12 +1189,12 @@ classdef KinematicsApp < matlab.apps.AppBase
                 [x0, y0] = getX0Y0(app);
 
                 % Streakline: release new particles at fixed time intervals, then advect all
-                nNew = floor((app.t - app.lastReleaseT) / app.dtRel);
+                nNew = floor((app.t - app.lastReleaseT) / app.DTSTREAK);
                 if nNew > 0
                     [x0,y0] = getX0Y0(app);
                     app.streakX = [app.streakX, repmat(x0, 1, nNew)];
                     app.streakY = [app.streakY, repmat(y0, 1, nNew)];
-                    app.lastReleaseT = app.lastReleaseT + nNew * app.dtRel;
+                    app.lastReleaseT = app.lastReleaseT + nNew * app.DTSTREAK;
 
                     ns = numel(app.streakX);
                     if ns > app.maxStreakPts
