@@ -16,7 +16,7 @@ classdef KinematicsApp < matlab.apps.AppBase
     %
     % Author: Alberto Cuadra Lara
     %
-    % Last update: 16/02/2026
+    % Last update: 18/02/2026
 
     properties (Access = public)
         UIFigure          matlab.ui.Figure
@@ -58,6 +58,9 @@ classdef KinematicsApp < matlab.apps.AppBase
         fpsConst double = 30          % Fixed FPS
         TmaxConst double = 12         % Used only for axis sizing in uniform cases
 
+        % Streamline
+        numStream int32 = 9           % Number of streamlines
+
         % Performance limits (keep only most recent samples)
         maxPathPts double = 6000      % Pathline polyline points
         maxStreakPts double = 1200    % Streak particles kept
@@ -83,7 +86,7 @@ classdef KinematicsApp < matlab.apps.AppBase
         streakDots                    % Streakdots
 
         % Cached geometry
-        Cvals double                  % Streamline family parameters / seeds (y-targets, etc.)
+        Cvals double                  % Streamlines
         dtRel double = 0.12           % Streak release interval (seconds)
         xg double                     % Grid of x values for streamlines
         yg double                     % Grid of y values for streamlines
@@ -353,7 +356,7 @@ classdef KinematicsApp < matlab.apps.AppBase
         end
 
         function onClose(app)
-            % UIFigure CloseRequestFcn
+            % UIFigure CloseRequestFcn callback. Stops timer and deletes the app.
             stopTimer(app);
             delete(app);
         end
@@ -365,13 +368,15 @@ classdef KinematicsApp < matlab.apps.AppBase
             updateOmegaEnable(app);
             updateV0Enable(app);
             resetAll(app);
+            
             if wasRunning
                 startTimer(app);
             end
+
         end
 
         function colorChanged(app)
-            % Callback for color pickers
+            % Callback for color pickers. Updates the colors of all graphics objects.
             updateColors(app);
             updateLegend(app);
         end
@@ -379,18 +384,17 @@ classdef KinematicsApp < matlab.apps.AppBase
         %% ------------------ Enable/Disable parameters ------------------
         function updateOmegaEnable(app)
             % Enable/disable omega input depending on the selected problem
+
+            % Definitions
             needsOmega = problemUsesOmega(app);
+
+            % Update UI
             if needsOmega
                 app.OmegaField.Enable = 'on';
-                if ~isempty(app.OmegaLabel) && isgraphics(app.OmegaLabel)
-                    app.OmegaLabel.Enable = 'on';
-                end
-            else
-                app.OmegaField.Enable = 'off';
-                if ~isempty(app.OmegaLabel) && isgraphics(app.OmegaLabel)
-                    app.OmegaLabel.Enable = 'off';
-                end
+                return
             end
+            
+            app.OmegaField.Enable = 'off';
         end
 
         function tf = problemUsesOmega(app)
@@ -404,18 +408,17 @@ classdef KinematicsApp < matlab.apps.AppBase
 
         function updateV0Enable(app)
             % Enable/disable V0 input depending on the selected problem
+
+            % Definitions
             needsV0 = problemUsesV0(app);
+
+            % Update UI
             if needsV0
                 app.V0Field.Enable = 'on';
-                if ~isempty(app.V0Label) && isgraphics(app.V0Label)
-                    app.V0Label.Enable = 'on';
-                end
-            else
-                app.V0Field.Enable = 'off';
-                if ~isempty(app.V0Label) && isgraphics(app.V0Label)
-                    app.V0Label.Enable = 'off';
-                end
+                return
             end
+
+            app.V0Field.Enable = 'off';
         end
 
         function tf = problemUsesV0(app)
@@ -791,8 +794,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.srcDot.HandleVisibility = 'off';
 
             % Streamlines setup
-            nStream = 9;
-            app.Cvals = linspace(app.yMin, app.yMax, nStream);
+            app.Cvals = linspace(app.yMin, app.yMax, app.numStream);
 
             ensureStreamObjects(app);
             ensurePathObjects(app);
@@ -821,17 +823,20 @@ classdef KinematicsApp < matlab.apps.AppBase
                 return;
             end
 
-            nStream = numel(app.Cvals);
-            app.streamH = gobjects(nStream, 1);
-            for i = 1:nStream
+            numStream = app.numStream;
+            app.streamH = gobjects(numStream, 1);
+            for i = 1:numStream
                 app.streamH(i) = plot(app.Axes, nan, nan, '-', 'LineWidth', 1.2);
+
                 if i == 1
                     app.streamH(i).DisplayName = 'Streamlines';
                     app.streamH(i).HandleVisibility = 'on';
                 else
                     app.streamH(i).HandleVisibility = 'off';
                 end
+
             end
+
         end
 
         function ensurePathObjects(app)
@@ -873,17 +878,9 @@ classdef KinematicsApp < matlab.apps.AppBase
                 return;
             end
 
+            % Definitions
             n = numel(app.streamH);
             val = app.ProblemDropDown.Value;
-
-            % Helper: clip to axes using NaNs (breaks lines)
-            function setLine(i, x, y)
-                mask = (x < app.xMin) | (x > app.xMax) | (y < app.yMin) | (y > app.yMax);
-                x(mask) = NaN;
-                y(mask) = NaN;
-                set(app.streamH(i), 'XData', x, 'YData', y);
-            end
-
             x = linspace(app.xMin, app.xMax, 1500);
 
             switch val
@@ -922,6 +919,7 @@ classdef KinematicsApp < matlab.apps.AppBase
                     if n >= 1
                         setLine(1, x, 0 * x); % y = 0
                     end
+                    
                     if n >= 2
                         yAxis = linspace(app.yMin, app.yMax, 800);
                         setLine(2, 0 * yAxis, yAxis); % x = 0
@@ -969,10 +967,13 @@ classdef KinematicsApp < matlab.apps.AppBase
                 % Implicit analytic: tan(ωy/2) = C (sec(ωx) + tan(ωx))
                 case 'Steady cellular: u=cos(ωx), v=sin(ωy)'
                     om = app.OmegaField.Value;
+
                     if abs(om) < 1e-12
+
                         for i = 1:n
                             setLine(i, x, app.Cvals(min(i, numel(app.Cvals))) + 0 * x);
                         end
+
                         return;
                     end
 
@@ -995,50 +996,62 @@ classdef KinematicsApp < matlab.apps.AppBase
                 otherwise
                     xSeed = app.xMin + 0.08 * (app.xMax - app.xMin);
                     ySeeds = linspace(app.yMin, app.yMax, n);
+
                     for i = 1:n
                         [xs, ys] = integrateStreamline(app, xSeed, ySeeds(i), app.t);
                         setLine(i, xs, ys);
                     end
             end
+
+            % SUB-PASS FUNCTIONS
+            function setLine(i, x, y)
+                % Helper to set streamline line data with axis clipping (NaN outside limits)
+                mask = (x < app.xMin) | (x > app.xMax) | (y < app.yMin) | (y > app.yMax);
+                x(mask) = NaN;
+                y(mask) = NaN;
+                set(app.streamH(i), 'XData', x, 'YData', y);
+            end
+
         end
 
         %% -------------------- Colors --------------------
         function updateColors(app)
             % Apply UI color pickers to plotted objects
 
-            cVel  = app.VelColorPicker.Value;
-            cStr  = app.StreamColorPicker.Value;
-            cPath = app.PathColorPicker.Value;
-            cStk  = app.StreakColorPicker.Value;
+            % Get colors from pickers
+            colorVelocity    = app.VelColorPicker.Value;
+            colorStreamline  = app.StreamColorPicker.Value;
+            colorPathline    = app.PathColorPicker.Value;
+            colorStreakline  = app.StreakColorPicker.Value;
 
             if ~isempty(app.qh) && isgraphics(app.qh)
-                app.qh.Color = cVel;
+                app.qh.Color = colorVelocity;
             end
 
             if ~isempty(app.streamH) && all(isgraphics(app.streamH))
                 for i = 1:numel(app.streamH)
-                    app.streamH(i).Color = cStr;
+                    app.streamH(i).Color = colorStreamline;
                 end
             end
 
             if ~isempty(app.pathLine) && isgraphics(app.pathLine)
-                app.pathLine.Color = cPath;
+                app.pathLine.Color = colorPathline;
             end
+
             if ~isempty(app.pDot) && isgraphics(app.pDot)
-                app.pDot.Color = cPath;
-                app.pDot.MarkerFaceColor = cPath;
+                app.pDot.Color = colorPathline;
+                app.pDot.MarkerFaceColor = colorPathline;
             end
 
             if ~isempty(app.streakLine) && isgraphics(app.streakLine)
-                app.streakLine.Color = cStk;
+                app.streakLine.Color = colorStreakline;
             end
+
             if ~isempty(app.streakDots) && isgraphics(app.streakDots)
-                try
-                    app.streakDots.MarkerFaceColor = cStk;
-                    app.streakDots.MarkerEdgeColor = cStk;
-                catch
-                end
+                app.streakDots.MarkerFaceColor = colorStreakline;
+                app.streakDots.MarkerEdgeColor = colorStreakline;
             end
+
         end
 
         %% -------------------- Hide/Show (no reset) --------------------
@@ -1059,18 +1072,25 @@ classdef KinematicsApp < matlab.apps.AppBase
                 if isempty(h)
                     return;
                 end
+
                 if iscell(h)
                     h = [h{:}];
                 end
+
                 for k = 1:numel(h)
-                    if isgraphics(h(k))
-                        if tf
-                            h(k).Visible = 'on';
-                        else
-                            h(k).Visible = 'off';
-                        end
+
+                    if ~isgraphics(h(k))
+                        continue;
                     end
+
+                    if tf
+                        h(k).Visible = 'on';
+                    else
+                        h(k).Visible = 'off';
+                    end
+
                 end
+
             end
         end
 
@@ -1097,14 +1117,17 @@ classdef KinematicsApp < matlab.apps.AppBase
                 hs(end + 1) = app.qh; %#ok<AGROW>
                 names{end + 1} = 'Velocity field'; %#ok<AGROW>
             end
+
             if ~isempty(app.streamH) && isgraphics(app.streamH(1)) && strcmp(app.streamH(1).Visible, 'on')
                 hs(end + 1) = app.streamH(1); %#ok<AGROW>
                 names{end + 1} = 'Streamlines'; %#ok<AGROW>
             end
+
             if ~isempty(app.pathLine) && isgraphics(app.pathLine) && strcmp(app.pathLine.Visible, 'on')
                 hs(end + 1) = app.pathLine; %#ok<AGROW>
                 names{end + 1} = 'Pathline'; %#ok<AGROW>
             end
+
             if ~isempty(app.streakLine) && isgraphics(app.streakLine) && strcmp(app.streakLine.Visible, 'on')
                 hs(end + 1) = app.streakLine; %#ok<AGROW>
                 names{end + 1} = 'Streakline'; %#ok<AGROW>
@@ -1147,7 +1170,7 @@ classdef KinematicsApp < matlab.apps.AppBase
                 t0 = app.t - dt;
                 [x0, y0] = getX0Y0(app);
 
-                % ---------------- Pathline (cap + optional decimation) ----------------
+                % Pathline: advance single particle with RK4, append to path every pathStride ticks
                 [xn, yn] = rk4Particle(app, app.pathX(end), app.pathY(end), t0, dt);
 
                 if mod(double(app.tickCount), app.pathStride) == 0
@@ -1165,7 +1188,7 @@ classdef KinematicsApp < matlab.apps.AppBase
                     app.pathY(end) = yn;
                 end
 
-                % ---------------- Streakline (cap + vectorized RK4) ------------------
+                % Streakline: release new particles at fixed time intervals, then advect all
                 while (app.t - app.lastReleaseT) >= app.dtRel
                     app.streakX(end + 1) = x0;
                     app.streakY(end + 1) = y0;
@@ -1176,15 +1199,17 @@ classdef KinematicsApp < matlab.apps.AppBase
                         app.streakX = app.streakX(ns - app.maxStreakPts + 1:ns);
                         app.streakY = app.streakY(ns - app.maxStreakPts + 1:ns);
                     end
+
                 end
 
-                [app.streakX, app.streakY] = rk4ParticleVec(app, app.streakX, app.streakY, t0, dt);
+                [app.streakX, app.streakY] = rk4Particle(app, app.streakX, app.streakY, t0, dt);
             end
 
             % Push data to graphics
             if ~isempty(app.pathLine) && isgraphics(app.pathLine)
                 set(app.pathLine, 'XData', app.pathX, 'YData', app.pathY);
             end
+
             if ~isempty(app.pDot) && isgraphics(app.pDot)
                 set(app.pDot, 'XData', app.pathX(end), 'YData', app.pathY(end));
             end
@@ -1192,6 +1217,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             if ~isempty(app.streakLine) && isgraphics(app.streakLine)
                 set(app.streakLine, 'XData', app.streakX, 'YData', app.streakY);
             end
+
             if ~isempty(app.streakDots) && isgraphics(app.streakDots)
                 set(app.streakDots, 'XData', app.streakX, 'YData', app.streakY);
             end
@@ -1199,6 +1225,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             % Update title
             updateTitle(app);
 
+            % Update graphics
             drawnow limitrate nocallbacks
         end
 
@@ -1223,7 +1250,6 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.isRunning = true;
 
             dt = 1 / app.fpsConst;
-            dt = max(dt, 0.001);
             dt = round(dt * 1000) / 1000;
             dt = max(dt, 0.001);
 
@@ -1255,6 +1281,7 @@ classdef KinematicsApp < matlab.apps.AppBase
                 end
 
             end
+
             app.Tmr = timer.empty;
         end
 
@@ -1267,8 +1294,9 @@ classdef KinematicsApp < matlab.apps.AppBase
             if app.isTicking
                 return;
             end
+
             app.isTicking = true;
-            c = onCleanup(@() setTickFalse(app)); %#ok<NASGU>
+            c = onCleanup(@() setTickFalse(app));
 
             if app.isResetting || ~app.isRunning || ~isgraphics(app.Axes)
                 return;
@@ -1278,10 +1306,14 @@ classdef KinematicsApp < matlab.apps.AppBase
             updatePlot(app, dt);
 
             function setTickFalse(appObj)
-                if isvalid(appObj)
-                    appObj.isTicking = false;
+                if ~isvalid(appObj)
+                    return
                 end
+
+                appObj.isTicking = false;
             end
+
         end
+
     end
 end
