@@ -658,6 +658,7 @@ classdef KinematicsLab < matlab.apps.AppBase
             app.UIFigure = uifigure('Name', 'Kinematics', 'Color', [0.94, 0.94, 0.94]);
             app.UIFigure.Position(3:4) = [900, 400];
             app.UIFigure.CloseRequestFcn = @(~, ~) onClose(app);
+            app.UIFigure.WindowKeyPressFcn = @(src,event) onKeyPress(app, event);
 
             gl = uigridlayout(app.UIFigure, [1, 2]);
             gl.ColumnWidth = {240, '1x'};
@@ -792,6 +793,31 @@ classdef KinematicsLab < matlab.apps.AppBase
             app.ClearButton.Layout.Row = 12;
             app.ClearButton.Layout.Column = [1, 3];
         end
+
+        function onKeyPress(app, event)
+            % Ctrl+S (Windows/Linux) or Cmd+S (macOS) => snapshot
+            if strcmpi(event.Key, 's') && any(ismember(lower(event.Modifier), {'control','command'}))
+                doSnapshot(app);
+            end
+        end
+
+        function doSnapshot(app)
+            % Open save dialog and export the current figure as an image
+
+            % Definitions
+            filter = {'*.pdf';'*.jpg';'*.png';'*.tif'};
+
+            % Get the file name and path
+            [filename, filepath] = uiputfile(filter, 'Save snapshot as');
+
+            % Export the figure if the user did not cancel
+            if isequal(filename, 0) || isequal(filepath, 0)
+                return
+            end
+
+            exportapp(app.UIFigure, fullfile(filepath, filename));
+        end
+
 
         function configureAxesAppearance(app)
             % Configure axes aesthetics and LaTeX labels.

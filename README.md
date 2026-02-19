@@ -1,13 +1,19 @@
-# KinematicsLab: MATLAB App for Exploring 2D Velocity Fields
+# KinematicsLab: Educational MATLAB App for exploring 2D velocity fields
 
-Interactive MATLAB App Designer tool to explore **2D velocity fields** and compare:
+Interactive MATLAB App to explore **2D velocity fields** and compare:
 
 - **Velocity field** (quiver)
 - **Streamlines** (instantaneous, at current time)
 - **Pathline** (single Lagrangian tracer)
 - **Streakline** (continuous release from a fixed point)
 
-Designed for teaching/learning basic kinematics and fluid mechanics concepts in **steady and unsteady** flows.
+Designed for teaching/learning basic kinematics ideas in fluid mechanics, for both **steady and unsteady** flows.
+
+![Example 1](./assets/example1.svg)
+
+![Example 2](./assets/example2.svg)
+
+![Example 3](./assets/example3.svg)
 
 ## Requirements
 
