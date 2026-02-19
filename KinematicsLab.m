@@ -1,4 +1,4 @@
-classdef KinematicsApp < matlab.apps.AppBase
+classdef KinematicsLab < matlab.apps.AppBase
     % Streamline / Pathline / Streakline explorer for 2D velocity fields
     %
     % Educational tool to illustrate core concepts in kinematics and fluid
@@ -16,7 +16,7 @@ classdef KinematicsApp < matlab.apps.AppBase
     %
     % Author: Alberto Cuadra Lara
     %
-    % Last update: 18/02/2026
+    % Last update: 19/02/2026
 
     properties (Access = public)
         UIFigure          matlab.ui.Figure
@@ -63,6 +63,8 @@ classdef KinematicsApp < matlab.apps.AppBase
         maxStreakPts double = 1200       % Maximum number of streak particles retained
         tickCount uint64 = uint64(0)     % Total number of simulation ticks since start
         numStreamlines int32 = 6         % Number of streamlines to display
+        numPointsStreamline double = 200 % Grid resolution for streamline generation via ψ contours
+        numContoursStreamline int32 = 6  % Number of streamline contours to display (when using ψ contour method)
 
         % Timer / simulation state
         Tmr = timer.empty                % Timer object driving the simulation loop
@@ -115,13 +117,21 @@ classdef KinematicsApp < matlab.apps.AppBase
         xLimListener event.listener = event.listener.empty  % Listener for x-axis limit changes
         yLimListener event.listener = event.listener.empty  % Listener for y-axis limit changes
 
-        % Problem ID
-        problemID uint8 = 1              % Identifier for the active flow/problem setup
+        % Flow 
+        Flows struct = struct( ...
+            'Label', {}, ...          % Dropdown label
+            'Velocity', {}, ...       % @(app,x,y,t) -> [u,v]
+            'AxisLimits', {}, ...     % @(app) -> [xMin xMax yMin yMax]
+            'Streamlines', {}, ...    % @(app,tFix,n) -> cell arrays {x_i},{y_i} (optional)
+            'UsesV0', {}, ...
+            'UsesOmega', {}, ...
+            'IsUnsteady', {} );
+        flowIndex uint16 = 1;         % active flow index into Flows
     end
 
 
     methods (Access = public)
-        function app = KinematicsApp
+        function app = KinematicsLab
             % Constructor
             createComponents(app);
             startup(app);
@@ -136,29 +146,165 @@ classdef KinematicsApp < matlab.apps.AppBase
 
         end
 
+        function addFlow(app, flow)
+            % Add a new flow definition to the Flow library
+            %
+            % Args:
+            %     flow (struct): Struct defining the flow, with at least the required fields
+            %
+            % Note:
+            %     * The required fields are Label and Velocity, which define the dropdown label and the velocity function, respectively.
+            %     * The velocity function should have the signature @(app,x,y,t) -> [u,v], where (x,y) are coordinates and t is time.
+            %     * Optional fields include AxisLimits (for automatic axis sizing), Streamlines (for custom streamline generation), and flags indicating whether the flow uses V0, omega, or is unsteady.
+            %
+            % Example:
+            %     app.addFlow(struct( 
+            %         'Label', 'Steady uniform: u=V0, v=0', ...
+            %         'UsesV0', true, 'UsesOmega', false, 'IsUnsteady', false, ...
+            %         'Velocity', @(app,x,y,t) deal(app.V0Field.Value + 0*x, 0 + 0*y), ...
+            %         'AxisLimits',  @(app) axisLimitsSteadyUniform(app), ...
+            %         'Streamlines', @(app,tFix,n) streamlinesUniform(app,tFix,n) ...
+            %     ));
+
+            arguments
+                app
+                flow struct
+            end
+
+            mustHave = {'Label','Velocity'};
+            for k = 1:numel(mustHave)
+                if ~isfield(flow, mustHave{k})
+                    error('addFlow:MissingField', 'Flow must define "%s".', mustHave{k});
+                end
+            end
+
+            % Defaults
+            if ~isfield(flow,'UsesV0'),     flow.UsesV0 = false; end
+            if ~isfield(flow,'UsesOmega'),  flow.UsesOmega = false; end
+            if ~isfield(flow,'IsUnsteady'), flow.IsUnsteady = false; end
+            if ~isfield(flow,'Streamlines'), flow.Streamlines = []; end
+            if ~isfield(flow,'AxisLimits')
+                flow.AxisLimits = @(app) defaultAxisLimits(app); % fallback
+            end
+
+            app.Flows(end+1) = flow;
+
+            % Keep dropdown synced
+            if ~isempty(app.ProblemDropDown) && isvalid(app.ProblemDropDown)
+                app.ProblemDropDown.Items = {app.Flows.Label};
+            end
+
+        end
+
     end
 
     methods (Access = private)
 
-        %% -------------------- Startup --------------------
         function startup(app)
             % Initialize defaults and reset the app.
             %
             % Args:
-            %     app (KinematicsApp): App instance
+            %     app (KinematicsLab): App instance
 
-            app.ProblemDropDown.Items = { ...
-                'Unsteady uniform: u=V0, v=V0 sin(ωt)', ...
-                'Steady uniform: u=V0, v=0', ...
-                'Steady saddle: u=x, v=-y', ...
-                'Steady source: u=x, v=y', ...
-                'Steady rotation: u=y, v=-x', ...
-                'Steady shear: u=V0, v=V0 x', ...
-                'Steady cellular: u=cos(ωx), v=sin(ωy)', ...
-                'Steady polynomial: u=(x^2+x-2)(x^2+x-12), v=y-3x+7' ...
-                };
-            app.ProblemDropDown.Value = app.ProblemDropDown.Items{1};
+            app.Flows = struct('Label',{},'Velocity',{},'AxisLimits',{},'Streamlines',{}, ...
+                            'UsesV0',{},'UsesOmega',{},'IsUnsteady',{});
 
+            % 1) Unsteady uniform: u=V0, v=V0 sin(ωt)
+            app.addFlow(struct( ...
+                'Label', 'Unsteady uniform: u=V0, v=V0 sin(ωt)', ...
+                'UsesV0', true, 'UsesOmega', true, 'IsUnsteady', true, ...
+                'Velocity', @(app,x,y,t) deal( ...
+                    app.V0Field.Value + 0*x, ...
+                    app.V0Field.Value * sin(app.OmegaField.Value*t) + 0*y), ...
+                'AxisLimits',  @(app) axisLimitsUnsteadyUniform(app), ...
+                'Streamlines', @(app,tFix,n) streamlinesUniform(app,tFix,n) ...
+            ));
+
+            % 2) Steady uniform: u=V0, v=0
+            app.addFlow(struct( ...
+                'Label', 'Steady uniform: u=V0, v=0', ...
+                'UsesV0', true, 'UsesOmega', false, 'IsUnsteady', false, ...
+                'Velocity', @(app,x,y,t) deal( ...
+                    app.V0Field.Value + 0*x, ...
+                    0 + 0*y), ...
+                'AxisLimits',  @(app) axisLimitsSteadyUniform(app), ...
+                'Streamlines', @(app,tFix,n) streamlinesUniform(app,tFix,n) ...
+            ));
+
+            % 3) Steady saddle: u=x, v=-y
+            app.addFlow(struct( ...
+                'Label', 'Steady saddle: u=x, v=-y', ...
+                'UsesV0', false, 'UsesOmega', false, 'IsUnsteady', false, ...
+                'Velocity', @(app,x,y,t) deal(x, -y), ...
+                'Streamlines', @(app,tFix,n) streamlinesSaddle(app,n) ...
+            ));
+
+            % 4) Steady source: u=x, v=y
+            app.addFlow(struct( ...
+                'Label', 'Steady source: u=x, v=y', ...
+                'UsesV0', false, 'UsesOmega', false, 'IsUnsteady', false, ...
+                'Velocity', @(app,x,y,t) deal(x, y), ...
+                'Streamlines', @(app,tFix,n) streamlinesSource(app,n) ...
+            ));
+
+            % 5) Steady rotation: u=y, v=-x
+            app.addFlow(struct( ...
+                'Label', 'Steady rotation: u=y, v=-x', ...
+                'UsesV0', false, 'UsesOmega', false, 'IsUnsteady', false, ...
+                'Velocity', @(app,x,y,t) deal(y, -x), ...
+                'Streamlines', @(app,tFix,n) streamlinesRotation(app,n) ...
+            ));
+
+            % 6) Steady shear: u=V0, v=V0 x
+            app.addFlow(struct( ...
+                'Label', 'Steady shear: u=V0, v=V0 x', ...
+                'UsesV0', true, 'UsesOmega', false, 'IsUnsteady', false, ...
+                'Velocity', @(app,x,y,t) deal( ...
+                    app.V0Field.Value + 0*x, ...
+                    app.V0Field.Value .* x), ...
+                'Streamlines', @(app,tFix,n) streamlinesShear(app,n) ...
+            ));
+
+            % 7) Steady cellular: u=cos(ωx), v=sin(ωy)
+            app.addFlow(struct( ...
+                'Label', 'Steady cellular: u=cos(ωx), v=sin(ωy)', ...
+                'UsesV0', false, 'UsesOmega', true, 'IsUnsteady', false, ...
+                'Velocity', @(app,x,y,t) deal( ...
+                    cos(app.OmegaField.Value .* x), ...
+                    sin(app.OmegaField.Value .* y)), ...
+                'AxisLimits',  @(app) axisLimitsCellular(app), ...
+                'Streamlines', @(app,tFix,n) streamlinesCellular(app,tFix,n) ...
+            ));
+
+            % 8) Steady Taylor–Green vortex (periodic cellular vortices)
+            app.addFlow(struct( ...
+                'Label', 'Steady Taylor–Green: u=sin(ωx)cos(ωy), v=-cos(ωx)sin(ωy)', ...
+                'UsesV0', false, 'UsesOmega', true, 'IsUnsteady', false, ...
+                'Velocity', @(app,x,y,t) taylorGreenVel(app,x,y,t), ...
+                'AxisLimits', @(app) axisLimitsTaylorGreen(app), ...
+                'Streamlines', @(app,tFix,n) streamlinesTaylorGreen(app,tFix,n) ... % contours of ψ
+            ));
+
+            % 9) Unsteady rotating saddle (saddle rotated by angle ωt)
+            app.addFlow(struct( ...
+                'Label', 'Unsteady rotating saddle (ωt-rotated u=x, v=-y)', ...
+                'UsesV0', false, 'UsesOmega', true, 'IsUnsteady', true, ...
+                'Velocity', @(app,x,y,t) rotatingSaddleVel(app,x,y,t), ...
+                'Streamlines', @(app,tFix,n) streamlinesRotatingSaddle(app,tFix,n) ... % contours of ψ
+            ));
+
+            % 10) Steady spiral sink (focus): u=-a x - V0 y, v=V0 x - a y
+            app.addFlow(struct( ...
+                'Label', 'Steady spiral sink (focus): u=-a x - V0 y, v=V0 x - a y', ...
+                'UsesV0', true, 'UsesOmega', false, 'IsUnsteady', false, ...
+                'Velocity', @(app,x,y,t) spiralSinkVel(app,x,y,t) ...
+            ));
+
+            % Defaults
+            app.ProblemDropDown.Items = {app.Flows.Label};
+            app.ProblemDropDown.Value = app.Flows(1).Label;
+            app.flowIndex = uint16(1);
+            
             app.VelCheckBox.Value    = true;
             app.StreamCheckBox.Value = true;
             app.PathCheckBox.Value   = true;
@@ -172,6 +318,334 @@ classdef KinematicsApp < matlab.apps.AppBase
             updateOmegaEnable(app);
             updateV0Enable(app);
             resetAll(app);
+
+            % NESTED FUNCTIONS
+            function lim = axisLimitsUnsteadyUniform(app)
+                V0 = app.V0Field.Value;
+                om = app.OmegaField.Value;
+                x0 = app.X0Field.Value;
+                y0 = app.Y0Field.Value;
+
+                Vabs = abs(V0);
+                xMin = x0 - Vabs * max(app.TMAX, 0) - 1;
+                xMax = x0 + Vabs * max(app.TMAX, 0) + 1;
+
+                if abs(om) > 1e-12
+                    A = 2 * Vabs / abs(om);
+                    if ~isfinite(A), A = 1; end
+                else
+                    A = 1;
+                end
+
+                yMin = y0 - 1.2 * A - 1;
+                yMax = y0 + 1.2 * A + 1;
+
+                lim = [xMin xMax yMin yMax];
+            end
+
+            function lim = axisLimitsSteadyUniform(app)
+                V0 = app.V0Field.Value;
+                x0 = app.X0Field.Value;
+                y0 = app.Y0Field.Value;
+
+                Vabs = abs(V0);
+                xMin = x0 - Vabs * max(app.TMAX, 0) - 1;
+                xMax = x0 + Vabs * max(app.TMAX, 0) + 1;
+
+                yMin = y0 - 4;
+                yMax = y0 + 4;
+
+                lim = [xMin xMax yMin yMax];
+            end
+
+            function lim = axisLimitsCellular(app)
+                om = app.OmegaField.Value;
+                x0 = app.X0Field.Value;
+                y0 = app.Y0Field.Value;
+
+                K = max(abs(om), 0.5);
+                L = 2*pi / K;
+
+                lim = [x0 - L, x0 + L, y0 - L, y0 + L];
+            end
+
+            function lim = axisLimitsTaylorGreen(app)
+                om = app.OmegaField.Value;
+                x0 = app.X0Field.Value;
+                y0 = app.Y0Field.Value;
+
+                k = max(abs(om), 0.5);
+                L = 2*pi / k;          % one spatial period
+                half = 0.55 * L;       % show ~one period with a bit of margin
+
+                lim = [x0 - half, x0 + half, y0 - half, y0 + half];
+            end
+
+            function [XS, YS] = streamlinesUniform(app, tFix, n)
+                x = linspace(app.xMin, app.xMax, 200);
+
+                [u0, v0] = app.velocity(0, 0, tFix);
+                slope = 0;
+                if abs(u0) > 1e-12
+                    slope = v0 / u0;
+                end
+
+                xRef = x(1);
+                C = linspace(app.yMin, app.yMax, n);
+
+                XS = cell(n,1);
+                YS = cell(n,1);
+                for i = 1:n
+                    XS{i} = x;
+                    YS{i} = C(i) + slope * (x - xRef);
+                end
+            end
+
+            function [XS, YS] = streamlinesSaddle(app, n)
+                x = linspace(app.xMin, app.xMax, 200);
+
+                XS = cell(n,1);
+                YS = cell(n,1);
+
+                if n >= 1
+                    XS{1} = x; YS{1} = 0*x; % y=0
+                end
+                if n >= 2
+                    yAxis = linspace(app.yMin, app.yMax, 800);
+                    XS{2} = 0*yAxis; YS{2} = yAxis; % x=0
+                end
+
+                m = max(n-2, 0);
+                if m > 0
+                    Cmax = 0.35 * (max(abs([app.xMin, app.xMax])) * max(abs([app.yMin, app.yMax])) + 1);
+                    Cvals = linspace(-Cmax, Cmax, m);
+                    Cvals(abs(Cvals) < 1e-9) = 0.15 * Cmax;
+
+                    xx = x;
+                    epsx = 1e-6 * max(1, max(abs(x)));
+                    xx(abs(xx) < epsx) = epsx;
+
+                    for k = 1:m
+                        i = k + 2;
+                        XS{i} = xx;
+                        YS{i} = Cvals(k) ./ xx; % x*y=C
+                    end
+                end
+
+                for i = 1:n
+                    if isempty(XS{i})
+                        XS{i} = nan; YS{i} = nan;
+                    end
+                end
+            end
+
+            function [XS, YS] = streamlinesSource(app, n)
+                theta = linspace(0, pi, n);
+                R = 1.5 * max(app.xMax - app.xMin, app.yMax - app.yMin);
+                r = linspace(-R, R, 1200);
+
+                XS = cell(n,1);
+                YS = cell(n,1);
+                for i = 1:n
+                    XS{i} = r * cos(theta(i));
+                    YS{i} = r * sin(theta(i));
+                end
+            end
+
+            function [XS, YS] = streamlinesRotation(app, n)
+                rMax = 0.95 * min(max(abs([app.xMin, app.xMax])), max(abs([app.yMin, app.yMax])));
+                rMin = max(0.15 * rMax, 0.2);
+                rVals = linspace(rMin, rMax, n);
+                th = linspace(0, 2*pi, 600);
+
+                XS = cell(n,1);
+                YS = cell(n,1);
+                for i = 1:n
+                    XS{i} = rVals(i) * cos(th);
+                    YS{i} = rVals(i) * sin(th);
+                end
+            end
+
+            function [XS, YS] = streamlinesShear(app, n)
+                x = linspace(app.xMin, app.xMax, 200);
+                C = linspace(app.yMin, app.yMax, n);
+
+                XS = cell(n,1);
+                YS = cell(n,1);
+                for i = 1:n
+                    XS{i} = x;
+                    YS{i} = 0.5 * x.^2 + C(i); % y = 0.5 x^2 + C
+                end
+            end
+
+            function [XS, YS] = streamlinesCellular(app, tFix, n)
+                om = app.OmegaField.Value;
+            
+                % ω -> 0 limit: u=1, v=0 => streamlines are y = const
+                if abs(om) < 1e-12
+                    psiFcn = @(app,X,Y,tFix) Y;
+                    [XS, YS] = streamlinesFromPsi(app, psiFcn, tFix, n);
+                    return
+                end
+            
+                % "Psi" here is a FIRST INTEGRAL (invariant), not a true streamfunction.
+                % Streamlines satisfy: tan(ωy/2) / (sec(ωx)+tan(ωx)) = const
+                % We contour atan(ratio) to compress dynamic range and avoid blow-ups.
+                psiFcn = @(app,X,Y,tFix) cellularInvariant(app, X, Y, om);
+            
+                [XS, YS] = streamlinesFromPsi(app, psiFcn, tFix, n);
+            
+                function psi = cellularInvariant(app, X, Y, om) %#ok<INUSL>
+                    wx = om .* X;
+                    wy = om .* Y;
+            
+                    denom = (1 ./ cos(wx)) + tan(wx);
+                    ratio = tan(wy/2) ./ denom; % invariant C
+            
+                    ratio(~isfinite(ratio)) = NaN;
+            
+                    % Compress range: preserves ordering/sign (ratio = tan(psi))
+                    psi = atan(ratio);
+                end
+            end
+
+            % Streamlines via ψ contours
+            function [XS, YS] = streamlinesFromPsi(app, psiFcn, tFix, n)
+                % Streamlines as contours of streamfunction psi
+
+                % Definitions
+                Nx = app.numPointsStreamline;
+                Ny = app.numPointsStreamline;
+                xvec = linspace(app.xMin, app.xMax, Nx);
+                yvec = linspace(app.yMin, app.yMax, Ny);
+                [X,Y] = meshgrid(xvec, yvec);
+                numContoursStreamline = app.numContoursStreamline;
+
+                psi = psiFcn(app, X, Y, tFix);
+                psi(~isfinite(psi)) = NaN;
+
+                XS = cell(n,1);
+                YS = cell(n,1);
+
+                p = psi(:);
+                p = p(isfinite(p));
+                if isempty(p)
+                    for i = 1:n, XS{i} = nan; YS{i} = nan; end
+                    return
+                end
+
+                % Robust magnitude range (avoid corner outliers)
+                absMax = prctile(abs(p), 90);
+                if ~isfinite(absMax) || absMax < 1e-12
+                    for i = 1:n, XS{i} = nan; YS{i} = nan; end
+                    return
+                end
+
+                % Ensures a separatrix level even when n is even
+                levels = linspace(-absMax, absMax, n);
+                levels(round((n+1)/2)) = 0; 
+
+                for i = 1:n
+                    lev = levels(i);
+                    C = contourc(xvec, yvec, psi, [lev lev]);
+
+                    [xs, ys] = collectTopSegments(C, numContoursStreamline);
+                    XS{i} = xs;
+                    YS{i} = ys;
+                end
+
+                % NESTED FUNCTIONS
+                function [xs, ys] = collectTopSegments(C, numContoursStreamline)
+                    xs = nan; ys = nan;
+                    if isempty(C), return; end
+
+                    segs = {};
+                    lens = [];
+
+                    idx = 1;
+                    while idx < size(C,2)
+                        npts = C(2,idx);
+                        if idx + npts > size(C,2), break; end
+                        seg = C(:, idx+1:idx+npts);
+                        segs{end+1} = seg;
+                        lens(end+1) = npts;
+                        idx = idx + npts + 1;
+                    end
+
+                    if isempty(segs), return; end
+
+                    % Keep largest segments
+                    [~, ord] = sort(lens, 'descend');
+                    ord = ord(1:min(numContoursStreamline, numel(ord)));
+
+                    xx = [];
+                    yy = [];
+                    for k = 1:numel(ord)
+                        s = segs{ord(k)};
+                        xx = [xx, s(1,:), NaN];
+                        yy = [yy, s(2,:), NaN];
+                    end
+
+                    % Remove trailing NaN
+                    if ~isempty(xx)
+                        xx(end) = [];
+                        yy(end) = [];
+                    end
+
+                    xs = xx;
+                    ys = yy;
+                end
+
+            end
+
+            function [u, v] = taylorGreenVel(app, x, y, t)
+                k = max(abs(app.OmegaField.Value), 0.5);
+                u =  sin(k.*x) .* cos(k.*y);
+                v = -cos(k.*x) .* sin(k.*y);
+            end
+
+            function [XS, YS] = streamlinesTaylorGreen(app, tFix, n)
+                k = max(abs(app.OmegaField.Value), 0.5);
+                psiFcn = @(app, X, Y, tFix) sin(k.*X) .* sin(k.*Y);
+                [XS, YS] = streamlinesFromPsi(app, psiFcn, tFix, n);
+            end
+
+            function [u, v] = rotatingSaddleVel(app, x, y, t)
+                th = app.OmegaField.Value .* t;
+                c = cos(th); s = sin(th);
+
+                % Rotate coordinates: [X;Y] = R^T [x;y]
+                X = c.*x + s.*y;
+                Y = -s.*x + c.*y;
+
+                % Saddle in rotated coords: U=X, V=-Y; transform back: [u;v]=R[U;V]
+                u = c.*X + s.*Y;
+                v = s.*X - c.*Y;
+            end
+
+            function [XS, YS] = streamlinesRotatingSaddle(app, tFix, n)
+                th = app.OmegaField.Value .* tFix;
+                c = cos(th); s = sin(th);
+
+                psiFcn = @(app, Xg, Yg, tFix) ( (c.*Xg + s.*Yg) .* (-s.*Xg + c.*Yg) );
+
+                [XS, YS] = streamlinesFromPsi(app, psiFcn, tFix, n);
+            end
+
+            function [u, v] = spiralSinkVel(app, x, y, t)
+                V0 = app.V0Field.Value;
+
+                a = 0.25; % Decay rate
+                u = -a.*x - V0.*y;
+                v =  V0.*x - a.*y;
+            end
+
+        end
+
+        function lim = defaultAxisLimits(app)
+            % Default axis limits (used when flow doesn't specify its own limits)
+            [x0,y0] = getX0Y0(app);
+            lim = [x0 - 4, x0 + 4, y0 - 4, y0 + 4];
         end
 
         %% -------------------- UI --------------------
@@ -179,7 +653,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             % Create UI layout and wire callbacks.
             %
             % Args:
-            %     app (KinematicsApp): App instance
+            %     app (KinematicsLab): App instance
 
             app.UIFigure = uifigure('Name', 'Kinematics', 'Color', [0.94, 0.94, 0.94]);
             app.UIFigure.Position(3:4) = [900, 400];
@@ -323,7 +797,7 @@ classdef KinematicsApp < matlab.apps.AppBase
             % Configure axes aesthetics and LaTeX labels.
             %
             % Args:
-            %     app (KinematicsApp): App instance
+            %     app (KinematicsLab): App instance
 
             app.Axes.Box = 'off';
             app.Axes.FontSize = app.fontsizeLabels + 2;
@@ -358,10 +832,10 @@ classdef KinematicsApp < matlab.apps.AppBase
             % Stops simulation, resets all graphics & histories, keeps running if it was running.
             wasRunning = app.isRunning;
 
-            % Cache problem as an integer
-            app.problemID = uint8(find(strcmp(app.ProblemDropDown.Value, app.ProblemDropDown.Items), 1, 'first'));
-            if isempty(app.problemID)
-                app.problemID = uint8(1);
+            app.flowIndex = uint16(find(strcmp(app.ProblemDropDown.Value, {app.Flows.Label}), 1, 'first'));
+
+            if isempty(app.flowIndex),
+                app.flowIndex = 1;
             end
 
             updateOmegaEnable(app);
@@ -390,14 +864,6 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.OmegaField.Enable = 'off';
         end
 
-        function tf = problemUsesOmega(app)
-            % Return true if the current problem definition uses omega
-            %
-            % Returns:
-            %     tf (logical): True if omega is used by the selected velocity field
-            tf = contains(app.ProblemDropDown.Value, 'ω');
-        end
-
         function updateV0Enable(app)
             % Enable/disable V0 input depending on the selected problem
 
@@ -408,17 +874,25 @@ classdef KinematicsApp < matlab.apps.AppBase
             app.V0Field.Enable = 'off';
         end
 
+        function tf = problemUsesOmega(app)
+            % Return true if the current problem definition uses omega
+            %
+            % Returns:
+            %     tf (logical): True if omega is used by the selected velocity field
+            tf = app.Flows(app.flowIndex).UsesOmega;
+        end
+
         function tf = problemUsesV0(app)
             % Return true if the current problem definition uses V0
             %
             % Returns:
             %     tf (logical): True if V0 is used by the selected velocity field
-            tf = contains(app.ProblemDropDown.Value, 'V0');
+            tf = app.Flows(app.flowIndex).UsesV0;
         end
 
         function tf = isUnsteady(app)
             % Return true if the selected velocity field is time-dependent
-            tf = strcmp(app.ProblemDropDown.Value, 'Unsteady uniform: u=V0, v=V0 sin(ωt)');
+            tf = app.Flows(app.flowIndex).IsUnsteady;
         end
 
         function [x0, y0] = getX0Y0(app)
@@ -444,49 +918,10 @@ classdef KinematicsApp < matlab.apps.AppBase
             %     u (double): x-velocity component at (x, y, t)
             %     v (double): y-velocity component at (x, y, t)
 
-            % Definitions
-            V0 = app.V0Field.Value;
-            om = app.OmegaField.Value;
-
-            % Get velocity components (switch on cached numeric id)
-            switch app.problemID
-                case 1  % Unsteady uniform: u=V0, v=V0 sin(ωt)
-                    u = V0 + 0 * x;
-                    v = V0 * sin(om * t) + 0 * y;
-
-                case 2  % Steady uniform: u=V0, v=0
-                    u = V0 + 0 * x;
-                    v = 0 + 0 * y;
-
-                case 3  % Steady saddle: u=x, v=-y
-                    u = x;
-                    v = -y;
-
-                case 4  % Steady source: u=x, v=y
-                    u = x;
-                    v = y;
-
-                case 5  % Steady rotation: u=y, v=-x
-                    u = y;
-                    v = -x;
-
-                case 6  % Steady shear: u=V0, v=V0 x
-                    u = V0 + 0 * x;
-                    v = V0 * x;
-
-                case 7  % Steady cellular: u=cos(ωx), v=sin(ωy)
-                    u = cos(om * x);
-                    v = sin(om * y);
-
-                case 8  % Steady polynomial: u=(x^2+x-2)(x^2+x-12), v=y-3x+7
-                    u = (x.^2 + x - 2) .* (x.^2 + x - 12);
-                    v = y - 3 * x + 7;
-
-                otherwise
-                    u = 0 + 0 * x;
-                    v = 0 + 0 * y;
-            end
+            F = app.Flows(app.flowIndex);
+            [u, v] = F.Velocity(app, x, y, t);
         end
+
 
         %% -------------------- RK4 helpers --------------------
         function [xn, yn] = rk4(app, x, y, t, dt)
@@ -511,7 +946,7 @@ classdef KinematicsApp < matlab.apps.AppBase
 
         %% -------------------- Pathline (precompute + marker) --------------------
         function precomputePathline(app)
-            % Precompute a pathline from t=0 using a fixed number of samples.
+            % Precompute a pathline from t=0 using a fixed number of samples
             %
             % Notes:
             %   * This draws the pathline "to infinity" in practice by choosing
@@ -547,7 +982,7 @@ classdef KinematicsApp < matlab.apps.AppBase
         end
 
         function [xp, yp] = pathPosAtTime(app, tNow)
-            % Interpolate precomputed pathline to get marker position at time tNow.
+            % Interpolate precomputed pathline to get marker position at time tNow
 
             if isempty(app.pathT) || numel(app.pathT) < 2
                 [x0, y0] = getX0Y0(app);
@@ -583,6 +1018,64 @@ classdef KinematicsApp < matlab.apps.AppBase
                 dy = v / s;
             end
         end
+
+        function [XS, YS] = streamlinesUniform(app, tFix, n)
+            x = linspace(app.xMin, app.xMax, 200);
+            [u0, v0] = app.velocity(0, 0, tFix);
+
+            slope = 0;
+            if abs(u0) > 1e-12
+                slope = v0 / u0;
+            end
+
+            xRef = x(1);
+            C = linspace(app.yMin, app.yMax, n);
+
+            XS = cell(n,1);
+            YS = cell(n,1);
+            for i = 1:n
+                XS{i} = x;
+                YS{i} = C(i) + slope*(x - xRef);
+            end
+        end
+
+        function [XS, YS] = streamlinesSaddle(app, n)
+            x = linspace(app.xMin, app.xMax, 200);
+
+            XS = cell(n,1);
+            YS = cell(n,1);
+
+            if n >= 1
+                XS{1} = x; YS{1} = 0*x;
+            end
+            if n >= 2
+                yAxis = linspace(app.yMin, app.yMax, 800);
+                XS{2} = 0*yAxis; YS{2} = yAxis;
+            end
+
+            m = max(n-2,0);
+            if m > 0
+                Cmax = 0.35*(max(abs([app.xMin, app.xMax]))*max(abs([app.yMin, app.yMax])) + 1);
+                Cvals = linspace(-Cmax, Cmax, m);
+                Cvals(abs(Cvals) < 1e-9) = 0.15*Cmax;
+
+                xx = x;
+                epsx = 1e-6*max(1, max(abs(x)));
+                xx(abs(xx) < epsx) = epsx;
+
+                for k = 1:m
+                    i = k + 2;
+                    XS{i} = xx;
+                    YS{i} = Cvals(k) ./ xx;
+                end
+            end
+
+            % Fill any empties if n small/odd cases
+            for i = 1:n
+                if isempty(XS{i}), XS{i} = nan; YS{i} = nan; end
+            end
+        end
+
 
         function [xs, ys] = integrateStreamline(app, x0, y0, tFix)
             % Numerically integrate a streamline from a seed point
@@ -672,55 +1165,13 @@ classdef KinematicsApp < matlab.apps.AppBase
             %   * For uniform flows, x-range depends on V0 and TmaxConst
             %   * For other cases, a default window around (x0,y0) is used
 
-            % Definitions
-            V0 = app.V0Field.Value;
-            om = app.OmegaField.Value;
-            problemID = app.problemID;
-            [x0, y0] = getX0Y0(app);
+            F = app.Flows(app.flowIndex);
+            lim = F.AxisLimits(app); % [xMin xMax yMin yMax]
 
-            switch problemID
-                case 1
-                    Vabs = abs(V0);
-                    app.xMin = x0 - Vabs * max(app.TMAX, 0) - 1;
-                    app.xMax = x0 + Vabs * max(app.TMAX, 0) + 1;
-
-                    if abs(om) > 1e-12
-                        A = 2 * Vabs / abs(om);
-                        if ~isfinite(A), A = 1; end
-                    else
-                        A = 1;
-                    end
-
-                    app.yMin = y0 - 1.2 * A - 1;
-                    app.yMax = y0 + 1.2 * A + 1;
-
-                case 2
-                    Vabs = abs(V0);
-                    app.xMin = x0 - Vabs * max(app.TMAX, 0) - 1;
-                    app.xMax = x0 + Vabs * max(app.TMAX, 0) + 1;
-                    app.yMin = y0 - 4;
-                    app.yMax = y0 + 4;
-
-                case 7
-                    K = max(abs(om), 0.5);
-                    L = 2 * pi / K;
-                    app.xMin = x0 - L;
-                    app.xMax = x0 + L;
-                    app.yMin = y0 - L;
-                    app.yMax = y0 + L;
-
-                case 8
-                    app.xMin = min(-6, x0 - 1);
-                    app.xMax = max( 6, x0 + 1);
-                    app.yMin = min(-22, y0 - 1);
-                    app.yMax = max(  6, y0 + 1);
-
-                otherwise
-                    app.xMin = x0 - 4;
-                    app.xMax = x0 + 4;
-                    app.yMin = y0 - 4;
-                    app.yMax = y0 + 4;
-            end
+            app.xMin = lim(1);
+            app.xMax = lim(2);
+            app.yMin = lim(3);
+            app.yMax = lim(4);
         end
 
         %% -------------------- View-dependent quiver --------------------
@@ -946,128 +1397,22 @@ classdef KinematicsApp < matlab.apps.AppBase
 
             % Definitions
             n = numel(app.streamH);
-            val = app.ProblemDropDown.Value;
-            x = linspace(app.xMin, app.xMax, 200);
+            F = app.Flows(app.flowIndex);
 
-            switch val
+            if ~isempty(F.Streamlines)
+                [XS, YS] = F.Streamlines(app, app.t, n);
+                for i = 1:n
+                    setLine(i, XS{i}, YS{i});
+                end
+            else
+                % Fallback numeric seeding (your existing fallback)
+                xSeed = app.xMin + 0.08 * (app.xMax - app.xMin);
+                ySeeds = linspace(app.yMin, app.yMax, n);
 
-                % Uniform cases: y = C + (v/u) x
-                case { ...
-                    'Unsteady uniform: u=V0, v=V0 sin(ωt)', ...
-                    'Steady uniform: u=V0, v=0' }
-
-                    [u0, v0] = app.velocity(0, 0, app.t);
-                    slope = 0;
-                    if abs(u0) > 1e-12
-                        slope = v0 / u0;
-                    end
-
-                    xRef = x(1);
-                    C = linspace(app.yMin, app.yMax, n);
-                    for i = 1:n
-                        y = C(i) + slope * (x - xRef);
-                        setLine(i, x, y);
-                    end
-
-                % Source: u=x, v=y -> y = C x (rays)
-                case 'Steady source: u=x, v=y'
-                    theta = linspace(0, pi, n);
-                    R = 1.5 * max(app.xMax - app.xMin, app.yMax - app.yMin);
-                    r = linspace(-R, R, 1200);
-                    for i = 1:n
-                        xi = r * cos(theta(i));
-                        yi = r * sin(theta(i));
-                        setLine(i, xi, yi);
-                    end
-
-                % Saddle: u=x, v=-y -> x y = C, plus axes
-                case 'Steady saddle: u=x, v=-y'
-                    if n >= 1
-                        setLine(1, x, 0 * x); % y = 0
-                    end
-
-                    if n >= 2
-                        yAxis = linspace(app.yMin, app.yMax, 800);
-                        setLine(2, 0 * yAxis, yAxis); % x = 0
-                    end
-
-                    m = max(n - 2, 0);
-                    if m > 0
-                        Cmax = 0.35 * (max(abs([app.xMin, app.xMax])) * max(abs([app.yMin, app.yMax])) + 1);
-                        Cvals = linspace(-Cmax, Cmax, m);
-                        Cvals(abs(Cvals) < 1e-9) = 0.15 * Cmax;
-
-                        xx = x;
-                        epsx = 1e-6 * max(1, max(abs(x)));
-                        idx0 = abs(xx) < epsx;
-                        xx(idx0) = epsx;
-
-                        for k = 1:m
-                            i = k + 2;
-                            y = Cvals(k) ./ xx;
-                            setLine(i, xx, y);
-                        end
-                    end
-
-                % Rotation: u=y, v=-x -> circles
-                case 'Steady rotation: u=y, v=-x'
-                    rMax = 0.95 * min(max(abs([app.xMin, app.xMax])), max(abs([app.yMin, app.yMax])));
-                    rMin = max(0.15 * rMax, 0.2);
-                    rVals = linspace(rMin, rMax, n);
-                    th = linspace(0, 2 * pi, 600);
-                    for i = 1:n
-                        xi = rVals(i) * cos(th);
-                        yi = rVals(i) * sin(th);
-                        setLine(i, xi, yi);
-                    end
-
-                % Shear: u=V0, v=V0 x -> dy/dx = x -> y = 0.5 x^2 + C
-                case 'Steady shear: u=V0, v=V0 x'
-                    C = linspace(app.yMin, app.yMax, n);
-                    for i = 1:n
-                        y = 0.5 * x.^2 + C(i);
-                        setLine(i, x, y);
-                    end
-
-                % Cellular: u=cos(ωx), v=sin(ωy)
-                % Implicit analytic: tan(ωy/2) = C (sec(ωx) + tan(ωx))
-                case 'Steady cellular: u=cos(ωx), v=sin(ωy)'
-                    om = app.OmegaField.Value;
-
-                    if abs(om) < 1e-12
-                        C = linspace(app.yMin, app.yMax, n);
-
-                        for i = 1:n
-                            setLine(i, x, C(i) + 0*x);
-                        end
-
-                        return
-                    end
-
-                    y0Targets = linspace(app.yMin, app.yMax, n);
-                    Cvals = tan(om * y0Targets / 2);
-
-                    wx = om * x;
-                    cwx = cos(wx);
-                    f = (1 ./ cwx) + tan(wx);
-
-                    bad = abs(cwx) < 0.03;
-                    f(bad) = NaN;
-
-                    for i = 1:n
-                        y = (2 / om) * atan(Cvals(i) * f);
-                        setLine(i, x, y);
-                    end
-
-                % Fallback: numeric streamline integration (steady non-uniform)
-                otherwise
-                    xSeed = app.xMin + 0.08 * (app.xMax - app.xMin);
-                    ySeeds = linspace(app.yMin, app.yMax, n);
-
-                    for i = 1:n
-                        [xs, ys] = integrateStreamline(app, xSeed, ySeeds(i), app.t);
-                        setLine(i, xs, ys);
-                    end
+                for i = 1:n
+                    [xs, ys] = integrateStreamline(app, xSeed, ySeeds(i), app.t);
+                    setLine(i, xs, ys);
+                end
             end
 
             % SUB-PASS FUNCTIONS
