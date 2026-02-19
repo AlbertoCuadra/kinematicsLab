@@ -42,4 +42,4 @@ Streamlines are computed using analytic formulas when convenient, or via **ψ/fi
 
 ## License
 
-Add your preferred license (e.g., MIT) in `LICENSE`.
+MIT License. See [LICENSE](LICENSE) for details.
