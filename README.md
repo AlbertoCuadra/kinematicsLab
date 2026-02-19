@@ -1,5 +1,7 @@
 # KinematicsLab: Educational MATLAB App for exploring 2D velocity fields
 
+[![View kinematicsLab on File Exchange](https://www.mathworks.com/matlabcentral/images/matlab-file-exchange.svg)](https://in.mathworks.com/matlabcentral/fileexchange/183288-kinematicslab)
+
 Interactive MATLAB App to explore **2D velocity fields** and compare:
 
 - **Velocity field** (quiver)
